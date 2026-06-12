@@ -1,0 +1,207 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storefront-app
+  namespace: shop
+  labels:
+    app: storefront
+    application: shop-checkout
+data:
+  server.py: |
+    import json
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+    import uuid
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    SERVICE = "storefront"
+    NAMESPACE = "shop"
+    APPLICATION = "shop-checkout"
+    TEAM = "payments"
+    CHECKOUT_URL = "http://checkout-demo.shop.svc:8080/status"
+
+    state = {
+        "mode": "normal",
+        "requests_total": {"success": 0, "error": 0},
+        "p99_latency_seconds": 0.08,
+        "up": 1,
+    }
+    lock = threading.Lock()
+
+    def log_event(level, event, message, **extra):
+        record = {
+            "level": level,
+            "service": SERVICE,
+            "namespace": NAMESPACE,
+            "application": APPLICATION,
+            "team": TEAM,
+            "event": event,
+            "message": message,
+            **extra,
+        }
+        print(json.dumps(record), flush=True)
+
+    def poll_checkout():
+        while True:
+            request_id = str(uuid.uuid4())
+            with lock:
+                mode = state["mode"]
+            if mode == "outage":
+                with lock:
+                    state["requests_total"]["error"] += 1
+                    state["p99_latency_seconds"] = 5.0
+                    state["up"] = 0
+                log_event(
+                    "ERROR",
+                    "storefront_outage_active",
+                    "storefront serving outage symptoms",
+                    request_id=request_id,
+                )
+                time.sleep(1)
+                continue
+            started = time.time()
+            try:
+                if mode == "slow":
+                    time.sleep(2.5)
+                with urllib.request.urlopen(CHECKOUT_URL, timeout=5) as resp:
+                    checkout_status = json.loads(resp.read().decode())
+                if checkout_status.get("backend_up", 1) == 0:
+                    raise ValueError("checkout-demo backend_up=0")
+                elapsed = time.time() - started
+                with lock:
+                    state["requests_total"]["success"] += 1
+                    state["p99_latency_seconds"] = max(state["p99_latency_seconds"] * 0.9, elapsed)
+                    state["up"] = 1
+            except Exception as exc:
+                elapsed = time.time() - started
+                with lock:
+                    state["requests_total"]["error"] += 1
+                    state["p99_latency_seconds"] = max(state["p99_latency_seconds"], elapsed)
+                    state["up"] = 0
+                log_event(
+                    "ERROR",
+                    "checkout_status_failed",
+                    "storefront failed to reach checkout-demo",
+                    request_id=request_id,
+                    downstream="checkout-demo",
+                    error=str(exc),
+                )
+            time.sleep(1)
+
+    class Handler(BaseHTTPRequestHandler):
+        def _write(self, code, body, content_type="text/plain"):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def do_GET(self):
+            request_id = str(uuid.uuid4())
+            if self.path == "/trigger-outage":
+                with lock:
+                    state["mode"] = "outage"
+                log_event("ERROR", "storefront_outage_started", "storefront switched to outage mode", request_id=request_id)
+                self._write(200, "storefront switched to outage mode\n")
+                return
+            if self.path == "/slow-mode":
+                with lock:
+                    state["mode"] = "slow"
+                log_event("WARN", "storefront_slow_mode", "storefront switched to slow mode", request_id=request_id)
+                self._write(200, "storefront switched to slow mode\n")
+                return
+            if self.path == "/recover":
+                with lock:
+                    state["mode"] = "normal"
+                    state["up"] = 1
+                log_event("INFO", "storefront_recovered", "storefront recovered", request_id=request_id)
+                self._write(200, "storefront recovered\n")
+                return
+            if self.path == "/status":
+                with lock:
+                    body = json.dumps(state, indent=2)
+                self._write(200, body + "\n", "application/json")
+                return
+            if self.path == "/metrics":
+                with lock:
+                    lines = [
+                        "# HELP storefront_up Whether storefront can reach checkout-demo.",
+                        "# TYPE storefront_up gauge",
+                        f'storefront_up{{service="{SERVICE}",namespace="{NAMESPACE}",team="{TEAM}",application="{APPLICATION}"}} {state["up"]}',
+                        "# HELP storefront_requests_total Storefront poll counter by result.",
+                        "# TYPE storefront_requests_total counter",
+                        f'storefront_requests_total{{service="{SERVICE}",namespace="{NAMESPACE}",team="{TEAM}",application="{APPLICATION}",result="success"}} {state["requests_total"]["success"]}',
+                        f'storefront_requests_total{{service="{SERVICE}",namespace="{NAMESPACE}",team="{TEAM}",application="{APPLICATION}",result="error"}} {state["requests_total"]["error"]}',
+                        "# HELP storefront_p99_latency_seconds Storefront synthetic p99 latency.",
+                        "# TYPE storefront_p99_latency_seconds gauge",
+                        f'storefront_p99_latency_seconds{{service="{SERVICE}",namespace="{NAMESPACE}",team="{TEAM}",application="{APPLICATION}"}} {state["p99_latency_seconds"]}',
+                    ]
+                self._write(200, "\n".join(lines) + "\n")
+                return
+            self._write(200, "storefront: use /status, /metrics, /trigger-outage, /slow-mode, /recover\n")
+
+        def log_message(self, fmt, *args):
+            return
+
+    threading.Thread(target=poll_checkout, daemon=True).start()
+    log_event("INFO", "storefront_started", "storefront listening on :8080")
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storefront
+  namespace: shop
+  labels:
+    app: storefront
+    application: shop-checkout
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: storefront
+  template:
+    metadata:
+      labels:
+        app: storefront
+        application: shop-checkout
+        service: storefront
+    spec:
+      containers:
+        - name: storefront
+          image: us-central1-docker.pkg.dev/keephq/keep/keep-api:0.52.1
+          command: ["python", "/app/server.py"]
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: app
+              mountPath: /app
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: app
+          configMap:
+            name: storefront-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storefront
+  namespace: shop
+  labels:
+    app: storefront
+    application: shop-checkout
+spec:
+  selector:
+    app: storefront
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

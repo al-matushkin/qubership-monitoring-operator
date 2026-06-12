@@ -46,6 +46,7 @@ The Grafana Operator automatically import all found datasources _in current name
 * [Collect metrics and add alarms](custom-resources/service-with-alarms/README.md)
 * [Collect metrics from custom endpoints](custom-resources/custom-endpoint/README.md)
 * [Collect metrics from HTTPS endpoints](custom-resources/service-with-tls/README.md)
+* [Keep shop-checkout PoC (Kind)](keep-shop-checkout-poc/README.md) — alert correlation, topology, log enrichment, SMTP notifications; see also [Keep evaluation package](../keep/README.md)
 
 
 

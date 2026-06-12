@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keep-backend-data
+  namespace: keep
+  labels:
+    app.kubernetes.io/part-of: keep
+    app.kubernetes.io/component: keep-shop-checkout-poc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,42 @@
+applications:
+  - id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+    name: shop-checkout
+    # 1004 is a synthetic leaf so payments-api (1003) has an outgoing dependency.
+    # Keep 0.52.x topology processor only indexes services that appear in dependencies[].
+    services: [1001, 1002, 1003, 1004]
+
+services:
+  - id: 1001
+    service: storefront
+    display_name: Storefront API
+    namespace: shop
+    team: payments
+  - id: 1002
+    service: checkout-demo
+    display_name: Checkout API
+    namespace: shop
+    team: payments
+  - id: 1003
+    service: payments-api
+    display_name: Payments API
+    namespace: shop
+    team: payments
+  - id: 1004
+    service: external-psp
+    display_name: External payment provider
+    namespace: shop
+    team: payments
+
+dependencies:
+  - id: 2001
+    service_id: 1001
+    depends_on_service_id: 1002
+    protocol: HTTP
+  - id: 2002
+    service_id: 1002
+    depends_on_service_id: 1003
+    protocol: HTTP
+  - id: 2003
+    service_id: 1003
+    depends_on_service_id: 1004
+    protocol: HTTPS

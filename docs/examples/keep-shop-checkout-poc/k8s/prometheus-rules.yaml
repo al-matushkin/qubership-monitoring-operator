@@ -1,0 +1,125 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: checkout-demo-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: shop-checkout-poc
+spec:
+  groups:
+    - name: checkout-demo.rules
+      interval: 15s
+      rules:
+        - alert: CheckoutDemoTargetDown
+          annotations:
+            description: checkout-demo reports backend_up=0.
+            summary: Checkout demo backend is unavailable
+          expr: checkout_backend_up{service="checkout-demo", namespace="shop", application="shop-checkout"} == 0
+          for: 30s
+          labels:
+            application: shop-checkout
+            component: checkout-demo
+            namespace: shop
+            service: checkout-demo
+            severity: critical
+            symptom: availability
+            team: payments
+        - alert: CheckoutDemoHighErrorRatio
+          annotations:
+            description: checkout-demo reports more than 20% synthetic 5xx responses.
+            summary: Checkout demo error ratio is high
+          expr: checkout_error_ratio{service="checkout-demo", namespace="shop", application="shop-checkout"} > 0.2
+          for: 30s
+          labels:
+            application: shop-checkout
+            component: checkout-demo
+            namespace: shop
+            service: checkout-demo
+            severity: critical
+            symptom: errors
+            team: payments
+        - alert: CheckoutDemoLatencyHigh
+          annotations:
+            description: checkout-demo reports p99 latency above 3 seconds.
+            summary: Checkout demo latency is high
+          expr: checkout_p99_latency_seconds{service="checkout-demo", namespace="shop", application="shop-checkout"} > 3
+          for: 30s
+          labels:
+            application: shop-checkout
+            component: checkout-demo
+            namespace: shop
+            service: checkout-demo
+            severity: warning
+            symptom: latency
+            team: payments
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: storefront-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: shop-checkout-poc
+spec:
+  groups:
+    - name: storefront.rules
+      interval: 15s
+      rules:
+        - alert: StorefrontCheckoutUnreachable
+          annotations:
+            description: storefront cannot reach checkout-demo /status.
+            summary: Storefront cannot reach checkout
+          expr: storefront_up{service="storefront", namespace="shop", application="shop-checkout"} == 0
+          for: 30s
+          labels:
+            application: shop-checkout
+            component: storefront
+            namespace: shop
+            service: storefront
+            severity: critical
+            symptom: availability
+            team: payments
+        - alert: StorefrontCheckoutLatencyHigh
+          annotations:
+            description: storefront reports checkout poll latency above 2 seconds.
+            summary: Storefront checkout latency is high
+          expr: storefront_p99_latency_seconds{service="storefront", namespace="shop", application="shop-checkout"} > 2
+          for: 30s
+          labels:
+            application: shop-checkout
+            component: storefront
+            namespace: shop
+            service: storefront
+            severity: warning
+            symptom: latency
+            team: payments
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: payments-api-rules
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: shop-checkout-poc
+spec:
+  groups:
+    - name: payments-api.rules
+      interval: 15s
+      rules:
+        - alert: PaymentsApiUnavailable
+          annotations:
+            description: payments-api reports payments_up=0.
+            summary: Payments API is unavailable
+          expr: payments_up{service="payments-api", namespace="shop", application="shop-checkout"} == 0
+          for: 30s
+          labels:
+            application: shop-checkout
+            component: payments-api
+            namespace: shop
+            service: payments-api
+            severity: critical
+            symptom: availability
+            team: payments

@@ -1,0 +1,26 @@
+skipMetricsService: false
+containerRuntimeType: containerd
+operatorImage: ghcr.io/netcracker/qubership-logging-operator:main
+graylog:
+  install: true
+  host: http://graylog-service.logging.svc:9000
+  createIngress: false
+  initContainerDockerImage: alpine:3.17.2
+  mongoStorageClassName: standard
+  graylogStorageClassName: standard
+  elasticsearchHost: http://admin:admin@opensearch.opensearch:9200
+  indexShards: 1
+  indexReplicas: 0
+  user: admin
+  password: admin
+fluentbit:
+  install: true
+  graylogHost: graylog-service
+  graylogPort: 12201
+  systemAuditLogging: false
+  kubeAuditLogging: false
+  kubeApiserverAuditLogging: false
+fluentd:
+  install: false
+integrationTests:
+  install: false

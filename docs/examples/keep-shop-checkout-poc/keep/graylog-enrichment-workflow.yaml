@@ -1,0 +1,38 @@
+workflow:
+  id: shop-checkout-graylog-enrichment
+  name: Shop checkout Graylog enrichment
+  description: Fetch related shop-checkout logs from Graylog when alerts fire.
+  triggers:
+    - type: alert
+      filters:
+        - key: namespace
+          value: shop
+  steps:
+    - name: fetch-shop-logs
+      provider:
+        type: graylog
+        config: "{{ providers.graylog-shop }}"
+        with:
+          events_search_parameters:
+            query: 'application:"shop-checkout" AND service:"{{ alert.service }}" AND namespace:"{{ alert.namespace }}"'
+            query_type: elastic
+            timerange_seconds: 600
+            timerange_type: relative
+            page: 0
+            per_page: 5
+  actions:
+    - name: enrich-with-logs
+      provider:
+        type: mock
+        with:
+          enrich_alert:
+            - key: log_snippet
+              value: |
+                Related {{ alert.service }} logs in {{ alert.namespace }} (last 10m, newest first):
+                1. {{ steps.fetch-shop-logs.results.0.message.time }} | {{ steps.fetch-shop-logs.results.0.message.source_level }} | {{ steps.fetch-shop-logs.results.0.message.event }} | pod={{ steps.fetch-shop-logs.results.0.message.pod }}
+                2. {{ steps.fetch-shop-logs.results.1.message.time }} | {{ steps.fetch-shop-logs.results.1.message.source_level }} | {{ steps.fetch-shop-logs.results.1.message.event }} | pod={{ steps.fetch-shop-logs.results.1.message.pod }}
+                3. {{ steps.fetch-shop-logs.results.2.message.time }} | {{ steps.fetch-shop-logs.results.2.message.source_level }} | {{ steps.fetch-shop-logs.results.2.message.event }} | pod={{ steps.fetch-shop-logs.results.2.message.pod }}
+                4. {{ steps.fetch-shop-logs.results.3.message.time }} | {{ steps.fetch-shop-logs.results.3.message.source_level }} | {{ steps.fetch-shop-logs.results.3.message.event }} | pod={{ steps.fetch-shop-logs.results.3.message.pod }}
+                5. {{ steps.fetch-shop-logs.results.4.message.time }} | {{ steps.fetch-shop-logs.results.4.message.source_level }} | {{ steps.fetch-shop-logs.results.4.message.event }} | pod={{ steps.fetch-shop-logs.results.4.message.pod }}
+            - key: graylog_query
+              value: 'application:"shop-checkout" AND service:"{{ alert.service }}" AND namespace:"{{ alert.namespace }}"'

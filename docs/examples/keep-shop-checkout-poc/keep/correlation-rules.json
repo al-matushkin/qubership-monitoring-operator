@@ -1,0 +1,22 @@
+[
+  {
+    "ruleName": "Shop checkout application-level correlation",
+    "sqlQuery": {
+      "sql": "((application = :application_1) and (namespace = :namespace_1))",
+      "params": {
+        "application_1": "shop-checkout",
+        "namespace_1": "shop"
+      }
+    },
+    "celQuery": "application == \"shop-checkout\" && namespace == \"shop\"",
+    "timeframeInSeconds": 3600,
+    "timeUnit": "minutes",
+    "threshold": 1,
+    "groupingCriteria": ["application", "namespace"],
+    "incidentNameTemplate": "shop-checkout outage in {{ alert.labels.namespace }}",
+    "incidentPrefix": "shopchk",
+    "groupDescription": "Correlate all shop-checkout alerts from every service into one application incident.",
+    "requireApprove": false,
+    "resolveOn": "never"
+  }
+]

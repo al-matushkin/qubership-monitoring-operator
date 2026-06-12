@@ -1,0 +1,37 @@
+workflow:
+  id: shop-checkout-smtp-notification
+  name: Shop checkout SMTP notification (rule)
+  description: One email per shopchk-* rule incident on created (not per alert update).
+  consts:
+    keep_ui_base: "http://keep.local:30080"
+  triggers:
+    - type: manual
+    - type: incident
+      events:
+        - created
+  actions:
+    - name: send-shop-checkout-rule-incident-email
+      if: "'{{ incident.incident_type }}' == 'rule' and ('{{ incident.status }}' contains 'FIRING' or '{{ incident.status }}' contains 'firing')"
+      provider:
+        type: smtp
+        config: "{{ providers.smtp-poc }}"
+        with:
+          from_email: "keep-poc@shop-checkout.local"
+          from_name: "Keep shop-checkout PoC"
+          to_email:
+            - "oncall@shop-checkout.local"
+          subject: "[{{ incident.severity }}] {{ incident.user_generated_name }}"
+          html: |
+            <h2>{{ incident.user_generated_name }}</h2>
+            <table cellpadding="4" cellspacing="0" style="border-collapse:collapse;">
+              <tr><td><b>View</b></td><td>{{ incident.incident_type }}</td></tr>
+              <tr><td><b>Severity</b></td><td>{{ incident.severity }}</td></tr>
+              <tr><td><b>Status</b></td><td>keep.lowercase(keep.replace('{{ incident.status }}', 'IncidentStatus.', ''))</td></tr>
+              <tr><td><b>Alerts linked</b></td><td>{{ incident.alerts_count }}</td></tr>
+              <tr><td><b>Services</b></td><td>keep.join({{ incident.services }}, ', ')</td></tr>
+              <tr><td><b>Scope</b></td><td>keep.replace('{{ incident.rule_fingerprint }}', ',', ' / namespace ')</td></tr>
+            </table>
+            <p style="margin:16px 0;">
+              <a href="{{ consts.keep_ui_base }}/incidents/{{ incident.id }}" style="display:inline-block;padding:10px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Open incident in Keep</a>
+            </p>
+            <p style="color:#555;font-size:14px;">Review linked alerts, runbooks, and Graylog enrichment in the incident view.</p>

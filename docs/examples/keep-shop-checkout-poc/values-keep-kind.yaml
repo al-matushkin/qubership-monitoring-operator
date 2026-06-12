@@ -1,0 +1,64 @@
+# Kind PoC overlay for the upstream Keep Helm chart (keephq/keep).
+# Persists SQLite on a PVC, enables the topology processor, and exposes UI/API via ingress.
+#
+# Prerequisite: ./deploy-keep-ingress-kind.sh (installs ingress-nginx NodePort :30080).
+# Add to /etc/hosts: 127.0.0.1 keep.local
+# Port-forward: ./port-forward-keep-ingress.sh  (default localhost:30080)
+# UI: http://keep.local:30080/   API: http://keep.local:30080/v2
+global:
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: keep.local
+    # Keep chart defaults: websocket /websocket, backend /v2, frontend /
+    backendPrefix: /v2
+    websocketPrefix: /websocket
+    frontendPrefix: /
+
+database:
+  enabled: false
+
+backend:
+  waitForDatabase:
+    enabled: false
+  env:
+    - name: DATABASE_CONNECTION_STRING
+      value: sqlite:////data/keep.db
+    # Provider credentials (Graylog, SMTP, …) default to FILE secret manager in the
+    # container working dir (/app), which is ephemeral. Store them on the same PVC
+    # as keep.db so pod restarts do not orphan provider rows in SQLite.
+    - name: SECRET_MANAGER_DIRECTORY
+      value: /data/secrets
+    - name: KEEP_TOPOLOGY_PROCESSOR
+      value: "true"
+    - name: KEEP_TOPOLOGY_PROCESSOR_INTERVAL
+      value: "10"
+    # Keep reads KEEP_TOPOLOGY_PROCESSOR_LOOK_BACK_WINDOW (not LOOKBACK).
+    - name: KEEP_TOPOLOGY_PROCESSOR_LOOK_BACK_WINDOW
+      value: "15"
+    # Public URL for workflow links when UI is served via ingress (port-forward :30080 on Kind).
+    - name: KEEP_API_URL
+      value: "http://keep.local:30080/v2"
+    # Frontend root for alert.url and other platform links (no /v2).
+    - name: KEEP_PLATFORM_URL
+      value: "http://keep.local:30080"
+  extraVolumes:
+    - name: keep-data
+      persistentVolumeClaim:
+        claimName: keep-backend-data
+    - name: prometheus-multiproc
+      emptyDir:
+        medium: Memory
+  extraVolumeMounts:
+    - name: keep-data
+      mountPath: /data
+    - name: prometheus-multiproc
+      mountPath: /tmp/prometheus
+
+frontend:
+  env:
+    # Default sidebar fields plus mapping (runbook_url, owner, escalation_tier) and Graylog query.
+    # Mapping fields are top-level alert properties, not labels — see Keep ALERT_SIDEBAR_FIELDS.
+    - name: ALERT_SIDEBAR_FIELDS
+      value: "service,source,description,message,fingerprint,url,runbook_url,owner,escalation_tier,graylog_query,incidents,timeline,relatedServices"

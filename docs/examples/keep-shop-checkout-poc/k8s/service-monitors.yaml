@@ -1,0 +1,59 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: storefront
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: shop-checkout-poc
+spec:
+  namespaceSelector:
+    matchNames:
+      - shop
+  selector:
+    matchLabels:
+      app: storefront
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: checkout-demo
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: shop-checkout-poc
+spec:
+  namespaceSelector:
+    matchNames:
+      - shop
+  selector:
+    matchLabels:
+      app: checkout-demo
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: payments-api
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: shop-checkout-poc
+spec:
+  namespaceSelector:
+    matchNames:
+      - shop
+  selector:
+    matchLabels:
+      app: payments-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
