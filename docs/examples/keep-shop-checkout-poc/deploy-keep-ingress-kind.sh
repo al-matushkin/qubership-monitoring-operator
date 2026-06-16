@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Install ingress-nginx on Kind (NodePort :30080) and upgrade Keep with values-keep-kind.yaml.
+# Install ingress-nginx on Kind (NodePort :30080) and upgrade Keep with a Kind values overlay.
+# Default: values-keep-kind-postgres.yaml (bundled PostgreSQL).
+# Optional SQLite: KEEP_VALUES_FILE=values-keep-kind.yaml (see README — Optional: SQLite overlay).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,6 +9,8 @@ INGRESS_NS="${INGRESS_NS:-ingress-nginx}"
 KEEP_NS="${KEEP_NS:-keep}"
 KEEP_HOST="${KEEP_HOST:-keep.local}"
 INGRESS_NODE_PORT="${INGRESS_NODE_PORT:-30080}"
+KEEP_VALUES_FILE="${KEEP_VALUES_FILE:-values-keep-kind-postgres.yaml}"
+KEEP_VALUES_PATH="${ROOT_DIR}/${KEEP_VALUES_FILE}"
 
 echo "==> Ensuring ingress-nginx is installed (NodePort ${INGRESS_NODE_PORT})..."
 if ! kubectl get namespace "${INGRESS_NS}" >/dev/null 2>&1; then
@@ -36,14 +40,27 @@ fi
 
 kubectl -n "${INGRESS_NS}" rollout status deploy/ingress-nginx-controller --timeout=180s
 
-echo "==> Upgrading Keep with ingress enabled..."
-helm upgrade keep keephq/keep \
+if [[ ! -f "${KEEP_VALUES_PATH}" ]]; then
+  echo "Keep values file not found: ${KEEP_VALUES_PATH}" >&2
+  exit 1
+fi
+
+echo "==> Upgrading Keep with ingress enabled (${KEEP_VALUES_FILE})..."
+helm repo add keephq https://keephq.github.io/helm-charts >/dev/null 2>&1 || true
+helm repo update keephq >/dev/null 2>&1 || helm repo update >/dev/null 2>&1 || true
+helm upgrade --install keep keephq/keep \
   --namespace "${KEEP_NS}" \
+  --create-namespace \
   --reuse-values=false \
-  -f "${ROOT_DIR}/values-keep-kind.yaml"
+  -f "${KEEP_VALUES_PATH}"
+
+if kubectl -n "${KEEP_NS}" get deploy keep-database >/dev/null 2>&1; then
+  echo "==> Waiting for PostgreSQL..."
+  kubectl -n "${KEEP_NS}" rollout status deploy/keep-database --timeout=300s
+fi
 
 kubectl -n "${KEEP_NS}" rollout status deploy/keep-frontend --timeout=180s
-kubectl -n "${KEEP_NS}" rollout status deploy/keep-backend --timeout=180s
+kubectl -n "${KEEP_NS}" rollout status deploy/keep-backend --timeout=300s
 
 # Helm sets NEXTAUTH_URL=http://keep.local (no port). With port-forward on :30080 the UI
 # redirects to port 80 and breaks. Patch after every upgrade (chart has no override hook).

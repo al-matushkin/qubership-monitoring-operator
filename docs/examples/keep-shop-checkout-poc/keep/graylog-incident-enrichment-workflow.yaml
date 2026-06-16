@@ -25,7 +25,7 @@ workflow:
         type: python
         config: "{{ providers.default-python }}"
         with:
-          code: '"\\n".join(["Shop-checkout incident logs (last 10m, newest first):"] + [f"{i}. {(m:=e.get(\"message\",e)).get(\"time\")} | {m.get(\"service\")} | {m.get(\"source_level\")} | {m.get(\"event\")} | pod={m.get(\"pod\")}" for i,e in enumerate({{ steps.fetch-incident-logs.results }}[:10], 1)])'
+          code: "(lambda logs: 'Shop-checkout incident logs (last 10m, newest first):' + chr(10) + chr(10).join([f\"- {i}. {(m:=e.get('message',e)).get('timestamp', m.get('time',''))} | {m.get('service', m.get('labels_service',''))} | {m.get('source_level','')} | {m.get('event','')} | pod={m.get('pod','')}\" for i,e in enumerate(logs[:10], 1)]))({{ steps.fetch-incident-logs.results }})"
   actions:
     - name: enrich-incident-with-logs
       provider:

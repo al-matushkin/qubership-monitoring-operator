@@ -25,7 +25,7 @@ workflow:
         type: python
         config: "{{ providers.default-python }}"
         with:
-          code: '"\\n".join([f"Related {{ alert.service }} logs in {{ alert.namespace }} (last 10m, newest first):"] + [f"{i}. {(m:=e.get(\"message\",e)).get(\"time\")} | {m.get(\"source_level\")} | {m.get(\"event\")} | pod={m.get(\"pod\")}" for i,e in enumerate({{ steps.fetch-shop-logs.results }}[:5], 1)])'
+          code: "(lambda logs: ' • '.join([f\"Related {{ alert.service }} logs in {{ alert.namespace }} (last 10m, newest first):\"] + [f\"{i}. {(m:=e.get('message',e)).get('timestamp', m.get('time',''))} | {m.get('source_level','')} | {m.get('event','')} | pod={m.get('pod','')}\" for i,e in enumerate(logs[:5], 1)]))({{ steps.fetch-shop-logs.results }})"
   actions:
     - name: enrich-with-logs
       provider:

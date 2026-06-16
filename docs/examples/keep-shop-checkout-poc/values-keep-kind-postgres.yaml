@@ -1,0 +1,74 @@
+# Kind PoC overlay for the upstream Keep Helm chart (keephq/keep).
+# Bundled PostgreSQL (fresh DB), K8s secret manager, topology processor, ingress.
+#
+# Prerequisite: ./deploy-keep-ingress-kind.sh (defaults to this file; override with KEEP_VALUES_FILE).
+# Add to /etc/hosts: 127.0.0.1 keep.local
+# Port-forward: ./port-forward-keep-ingress.sh  (default localhost:30080)
+# UI: http://keep.local:30080/   API: http://keep.local:30080/v2
+#
+# After first install or DB reset, re-apply PoC config:
+#   KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
+global:
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: keep.local
+    backendPrefix: /v2
+    websocketPrefix: /websocket
+    frontendPrefix: /
+
+database:
+  enabled: true
+  type: postgres
+  postgres:
+    image:
+      repository: postgres
+      tag: "15"
+    env:
+      - name: POSTGRES_DB
+        value: keep
+      - name: POSTGRES_PASSWORD
+        value: keep-poc-password
+    port: 5432
+    config:
+      maxConnections: 100
+      sharedBuffers: 128MB
+  pvc:
+    enabled: true
+    size: 5Gi
+    storageClass: standard
+
+backend:
+  waitForDatabase:
+    enabled: true
+    port: 5432
+  env:
+    - name: DATABASE_CONNECTION_STRING
+      value: postgresql+psycopg2://postgres:keep-poc-password@keep-database:5432/keep
+    - name: DATABASE_NAME
+      value: keep-database
+    - name: SECRET_MANAGER_TYPE
+      value: k8s
+    - name: KEEP_TOPOLOGY_PROCESSOR
+      value: "true"
+    - name: KEEP_TOPOLOGY_PROCESSOR_INTERVAL
+      value: "10"
+    - name: KEEP_TOPOLOGY_PROCESSOR_LOOK_BACK_WINDOW
+      value: "15"
+    - name: KEEP_API_URL
+      value: "http://keep.local:30080/v2"
+    - name: KEEP_PLATFORM_URL
+      value: "http://keep.local:30080"
+  extraVolumes:
+    - name: prometheus-multiproc
+      emptyDir:
+        medium: Memory
+  extraVolumeMounts:
+    - name: prometheus-multiproc
+      mountPath: /tmp/prometheus
+
+frontend:
+  env:
+    - name: ALERT_SIDEBAR_FIELDS
+      value: "service,source,description,message,fingerprint,url,runbook_url,owner,escalation_tier,graylog_query,incidents,timeline,relatedServices"

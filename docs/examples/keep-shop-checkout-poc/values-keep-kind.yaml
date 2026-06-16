@@ -1,5 +1,7 @@
-# Kind PoC overlay for the upstream Keep Helm chart (keephq/keep).
-# Persists SQLite on a PVC, enables the topology processor, and exposes UI/API via ingress.
+# Optional Kind overlay: SQLite on a PVC instead of bundled PostgreSQL.
+# Default path: values-keep-kind-postgres.yaml (see README).
+# Use: kubectl apply -f k8s/keep-backend-pvc.yaml
+#      KEEP_VALUES_FILE=values-keep-kind.yaml ./deploy-keep-ingress-kind.sh
 #
 # Prerequisite: ./deploy-keep-ingress-kind.sh (installs ingress-nginx NodePort :30080).
 # Add to /etc/hosts: 127.0.0.1 keep.local

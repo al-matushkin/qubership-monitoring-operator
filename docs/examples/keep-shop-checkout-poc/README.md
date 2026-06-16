@@ -25,6 +25,46 @@ Keep integration:
 
 Grafana and Jaeger are intentionally excluded.
 
+### VMAlertmanager → Keep (alert webhook)
+
+Alerts reach Keep through a standard **Alertmanager webhook** — not a custom vmalert push and not the Keep VictoriaMetrics *provider* (that provider is for querying metrics inside workflows).
+
+```text
+vmalert  →  VMAlertmanager  →  receiver keep-shadow (webhook_configs)  →  Keep backend
+```
+
+| Piece | Value (PoC) |
+|-------|-------------|
+| Keep ingest URL | `http://keep-backend.keep.svc:8080/alerts/event/victoriametrics` |
+| Alternate URL | `/alerts/event/prometheus` — same Alertmanager JSON payload; also used on some Kind setups |
+| Auth | HTTP Basic: username `api_key`, password = Keep API key (`any-local-key` in the local PoC) |
+| Receiver name | `keep-shadow` (convention only; any name works) |
+| Resolved alerts | Set `send_resolved: true` so Keep auto-resolves when VMAlertmanager clears an alert |
+
+Keep documents this pattern in the [VictoriaMetrics provider — webhook section](https://docs.keephq.dev/providers/documentation/victoriametrics-provider#connecting-via-webhook-omnidirectional). `vmalert` talks to VMAlertmanager (`/api/v2/alerts`); VMAlertmanager forwards to Keep in **outbound webhook** form. Do not point vmalert directly at Keep.
+
+**Kind / PoC (replace default route):** after monitoring-operator and Keep backend are up:
+
+```bash
+kubectl apply -f k8s/vmalertmanager-keep-shadow.yaml
+```
+
+That patches secret `vmalertmanager-config-secret` in namespace `monitoring` (see [`k8s/vmalertmanager-keep-shadow.yaml`](k8s/vmalertmanager-keep-shadow.yaml)). Change `password` if your Keep API key is not `any-local-key`.
+
+**Production (additive route):** keep existing ops receivers and merge a shadow route with `continue: true` — example in [`k8s/vmalertmanager-keep-shadow-additive.yaml`](k8s/vmalertmanager-keep-shadow-additive.yaml). Prefer **light inhibition** on the Keep path so correlation still sees symptom alerts ([checklist item 3](../../keep/follow-up-checklist.md)).
+
+**Verify wiring:**
+
+```bash
+# VMAlertmanager has the receiver
+kubectl -n monitoring get secret vmalertmanager-config-secret -o jsonpath='{.data.alertmanager\.yaml}' | base64 -d | grep -A5 keep-shadow
+
+# After an outage, alerts appear in Keep (needs shop rules + port-forward on ingress :30080)
+curl -su 'api_key:any-local-key' 'http://keep.local:30080/v2/alerts?status=firing&limit=5' | jq 'length'
+```
+
+If Keep shows no alerts but VMAlertmanager does, check webhook delivery in VMAlertmanager logs (`kubectl -n monitoring logs statefulset/vmalertmanager-k8s`) and that the URL is reachable from the `monitoring` namespace.
+
 ### Incidents: rule vs topology
 
 This PoC enables **both** correlation mechanisms:
@@ -63,23 +103,22 @@ curl -u 'api_key:any-local-key' \
 
 **Workflows:** mapping fields are available in workflow expressions, e.g. `{{ alert.runbook_url }}`.
 
-**UI sidebar:** `values-keep-kind.yaml` sets `ALERT_SIDEBAR_FIELDS` to include `runbook_url`, `owner`, `escalation_tier`, and `graylog_query` ([Keep docs](https://docs.keephq.dev/deployment/configuration)). Re-apply with `helm upgrade` after changing that overlay.
+**UI sidebar:** `values-keep-kind-postgres.yaml` sets `ALERT_SIDEBAR_FIELDS` to include `runbook_url`, `owner`, `escalation_tier`, and `graylog_query` ([Keep docs](https://docs.keephq.dev/deployment/configuration)). Re-apply with `helm upgrade` after changing that overlay.
 
 **Timing:** mapping runs on **new alert ingest** only. Deduplicated repeat webhooks may keep stale enrichments until a fresh firing cycle (recover → re-trigger outage).
 
 ### Extraction and alert visibility
 
-**Extraction rules are not required** for this PoC. VMAlert/Alertmanager delivers structured labels and `description`; mapping and Graylog workflows add ops/log fields. Extend **`ALERT_SIDEBAR_FIELDS`** in `values-keep-kind.yaml` (e.g. `log_snippet`, `symptom`, `pod`) rather than adding regex extraction. See checklist item 5 in [`follow-up-checklist.md`](../../keep/follow-up-checklist.md).
+**Extraction rules are not required** for this PoC. VMAlert/Alertmanager delivers structured labels and `description`; mapping and Graylog workflows add ops/log fields. Extend **`ALERT_SIDEBAR_FIELDS`** in `values-keep-kind-postgres.yaml` (e.g. `log_snippet`, `symptom`, `pod`) rather than adding regex extraction. See checklist item 5 in [`follow-up-checklist.md`](../../keep/follow-up-checklist.md).
 
-**Incident log rollup:** `graylog-incident-enrichment-workflow.yaml` runs on incident `created`/`updated`, queries Graylog for all `shop-checkout` logs in `shop`, formats hits with the built-in **Python provider** (`default-python`), and sets incident enrichments `log_summary` + `graylog_query`. Per-alert `log_snippet` uses the same pattern in `graylog-enrichment-workflow.yaml`.
+**Incident log rollup:** `graylog-incident-enrichment-workflow.yaml` runs on incident `created`/`updated`, queries Graylog for all `shop-checkout` logs in `shop`, formats hits with the built-in **Python provider** (`default-python`), and sets incident enrichments `log_summary` + `graylog_query`. `log_summary` is a **single string** with `- ` prefixed lines (Keep 0.52.x treats array enrichments as clickable alert-filter badges, so do not store logs as an array). Per-alert `log_snippet` uses bullet separators (` • `) in `graylog-enrichment-workflow.yaml`.
 
 ### Keep persistence + ingress (Kind)
 
-The default Keep Helm install uses `sqlite:////tmp/keep.db` (lost on pod restart). Use the PoC overlay for persistent SQLite, topology processor, ingress, and sidebar fields:
+This PoC deploys Keep with **bundled PostgreSQL** (`values-keep-kind-postgres.yaml`) — chart-managed PVC, K8s-backed provider secrets, topology processor, and ingress on `keep.local`.
 
 ```bash
-kubectl apply -f k8s/keep-backend-pvc.yaml
-chmod +x deploy-keep-ingress-kind.sh
+chmod +x deploy-keep-ingress-kind.sh port-forward-keep-ingress.sh
 ./deploy-keep-ingress-kind.sh
 ```
 
@@ -92,7 +131,6 @@ Add to `/etc/hosts`:
 Start ingress port-forward (required on Kind — NodePort is not bound to 127.0.0.1):
 
 ```bash
-chmod +x port-forward-keep-ingress.sh
 ./port-forward-keep-ingress.sh
 ```
 
@@ -100,23 +138,18 @@ Default local port is **30080**. Open **http://keep.local:30080/** (API: **http:
 
 Without port-forward, use the Kind node IP in hosts — e.g. `172.18.0.2 keep.local` → **http://keep.local:30080/**.
 
-`values-keep-kind.yaml` sets:
+The Postgres overlay sets:
 
-- `DATABASE_CONNECTION_STRING=sqlite:////data/keep.db` on PVC `keep-backend-data`
-- `SECRET_MANAGER_DIRECTORY=/data/secrets` (provider credentials on the same PVC)
+- Bundled Postgres (`keep-database:5432/keep`) with chart-managed PVC
+- `DATABASE_CONNECTION_STRING=postgresql+psycopg2://postgres:…@keep-database:5432/keep`
+- `SECRET_MANAGER_TYPE=k8s` — provider secrets in Kubernetes `Secret` objects
 - `KEEP_TOPOLOGY_PROCESSOR=true`
 - `global.ingress` on `keep.local`
 - `ALERT_SIDEBAR_FIELDS` for mapping and Graylog columns
 
-**Provider credentials vs SQLite:** Keep stores provider *metadata* in SQLite but provider *secrets* (Graylog token, SMTP settings) via the file secret manager. Without `SECRET_MANAGER_DIRECTORY`, secret files land in the ephemeral container filesystem (`/app`) and are **lost when the backend pod is replaced** (Helm upgrade, rollout, or restart), while SQLite rows remain — workflows then fail with “provider not configured”. The overlay stores secrets at `/data/secrets` on the PVC. After upgrading from an older install, run `apply-keep-config.sh` once to reinstall providers if needed.
+A **fresh Helm install or overlay switch** starts an empty database (Alembic schema on startup). Re-run `apply-keep-config.sh` after deploy; prior alerts/incidents are not migrated automatically.
 
-| Approach | PoC / production | Notes |
-|----------|------------------|-------|
-| `SECRET_MANAGER_DIRECTORY=/data/secrets` | PoC (this repo) | File secrets on PVC |
-| `SECRET_MANAGER_TYPE=DB` | Single-node SQLite | Secrets in `secret` table inside `keep.db` |
-| `SECRET_MANAGER_TYPE=k8s` | Production Helm default | Native Kubernetes `Secret` objects |
-
-**Restore Keep config** (after DB reset, fresh PVC, or provider breakage) — Graylog token creation needs port-forward on `19000` from the host:
+**Restore Keep config** (after DB reset or provider breakage) — Graylog token creation needs port-forward on `19000` from the host:
 
 ```bash
 kubectl -n logging port-forward svc/graylog-service 19000:9000 &
@@ -133,10 +166,11 @@ KEEP_API_URL=http://127.0.0.1:18080 ./keep/apply-keep-config.sh
 
 ## Prerequisites
 
-- Kind cluster with monitoring-operator and Keep already installed
+- Kind cluster with **monitoring-operator** (VMAlert, VMAlertmanager, vmagent) and **Keep** Helm release installed
 - `kubectl` context pointed at the cluster (for example `kind-observability-local`)
 - Local clones of `qubership-opensearch` and `qubership-logging-operator` next to this repo
-- Keep API key for the `keep-shadow` receiver (`api_key:any-local-key` in the local PoC)
+- VMAlertmanager wired to Keep via `keep-shadow` webhook ([see above](#vmalertmanager--keep-alert-webhook)); PoC manifest: `k8s/vmalertmanager-keep-shadow.yaml`
+- Keep API key matching the webhook password (`api_key:any-local-key` in the local PoC)
 
 ## Deploy order
 
@@ -155,10 +189,17 @@ kubectl wait --for=condition=ready pod -l application=shop-checkout -n shop --ti
 ### 2. Keep persistence + ingress
 
 ```bash
-kubectl apply -f k8s/keep-backend-pvc.yaml
-./deploy-keep-ingress-kind.sh
-./port-forward-keep-ingress.sh   # separate terminal, or background
+./deploy-keep-ingress-kind.sh          # bundled PostgreSQL
+./port-forward-keep-ingress.sh           # separate terminal, or background
 ```
+
+### 2b. VMAlertmanager → Keep webhook
+
+```bash
+kubectl apply -f k8s/vmalertmanager-keep-shadow.yaml
+```
+
+Skip if already configured. See [VMAlertmanager → Keep](#vmalertmanager--keep-alert-webhook).
 
 ### 3. Keep topology, rules, mapping, workflows
 
@@ -217,9 +258,10 @@ kubectl -n shop exec deploy/checkout-demo -- wget -qO- http://127.0.0.1:8080/rec
 
 | Path | Purpose |
 |------|---------|
-| `k8s/` | Shop app, ServiceMonitors, PrometheusRules, Keep PVC |
-| `values-keep-kind.yaml` | Keep Helm overlay (SQLite PVC, secrets dir, topology processor, ingress) |
-| `k8s/keep-backend-pvc.yaml` | PVC for `/data/keep.db` and `/data/secrets` |
+| `k8s/` | Shop app, ServiceMonitors, PrometheusRules, Keep PVC, VMAlertmanager keep-shadow secret |
+| `k8s/vmalertmanager-keep-shadow.yaml` | VMAlertmanager secret: `keep-shadow` webhook → Keep |
+| `k8s/vmalertmanager-keep-shadow-additive.yaml` | Optional `VMAlertmanagerConfig` merge (shadow route with `continue: true`) |
+| `values-keep-kind-postgres.yaml` | Keep Helm overlay (bundled Postgres, K8s secrets, topology, ingress) — **default** |
 | `values-opensearch-kind.yaml` | Minimal OpenSearch for Kind |
 | `values-logging-kind.yaml` | Graylog + FluentBit for Kind |
 | `keep/topology.yaml` | Manual Keep topology (includes synthetic `external-psp` for processor quirk) |
@@ -247,6 +289,22 @@ Two workflows (one email per incident episode, not per alert):
 
 Verify: `./keep/test-smtp-notification.sh` (Mailpit UI: port-forward `8025` → `http://127.0.0.1:18025/`).
 
+### Optional: SQLite overlay
+
+The first PoC revision used SQLite on a PVC (`values-keep-kind.yaml`). **Postgres is the supported path now** — use the files below only if you cannot run the chart's bundled Postgres.
+
+```bash
+kubectl apply -f k8s/keep-backend-pvc.yaml
+KEEP_VALUES_FILE=values-keep-kind.yaml ./deploy-keep-ingress-kind.sh
+```
+
+| File | Role |
+|------|------|
+| `values-keep-kind.yaml` | SQLite on PVC + file-based provider secrets (`SECRET_MANAGER_DIRECTORY=/data/secrets`) |
+| `k8s/keep-backend-pvc.yaml` | PVC for `/data/keep.db` and `/data/secrets` |
+
+Switching between SQLite and Postgres starts a **fresh** database; re-run `apply-keep-config.sh` and do not expect data migration.
+
 ## Kind troubleshooting
 
 | Issue | Fix |
@@ -254,11 +312,13 @@ Verify: `./keep/test-smtp-notification.sh` (Mailpit UI: port-forward `8025` → 
 | Graylog `download-plugins` init fails | Set `graylog.initContainerDockerImage: alpine:3.17.2` in `values-logging-kind.yaml`, delete `statefulset/graylog`, wait for operator to recreate |
 | FluentBit crashes on `/var/log/audit/audit.db` | Set audit logging flags to `false` in `values-logging-kind.yaml`; restart logging operator and FluentBit |
 | OpenSearch Helm pre-install hook timeout | Re-run `helm upgrade --install opensearch ... --wait --timeout 20m` |
-| Keep topology/rules lost after restart | Apply PVC + `helm upgrade ... -f values-keep-kind.yaml` |
+| Keep topology/rules lost after DB reset | Re-run `./keep/apply-keep-config.sh` |
+| No alerts in Keep UI | Apply `k8s/vmalertmanager-keep-shadow.yaml`; confirm API key matches webhook `basic_auth.password` |
 | Graylog/SMTP workflows fail (“provider not configured”) | Ensure `SECRET_MANAGER_DIRECTORY=/data/secrets`, `helm upgrade`, re-run `apply-keep-config.sh` |
 | Graylog log enrichment empty or workflow step fails on `format-log-*` | Ensure `default-python` is installed (`apply-keep-config.sh` installs it before Graylog workflows) |
 | Keep topology import fails | Service ids must be integers; application id must be UUID |
 | Graylog provider install fails from host | Port-forward Graylog on `19000`; token via `POST /api/users/{id}/tokens/keep-shop-poc` (Graylog 5) |
+| `log_summary` rows link to broken alert pages | Re-run `apply-keep-config.sh`; incident workflow must store `log_summary` as a string, not an array |
 | Stale `log_snippet` on firing alerts | Keep deduplicates repeat webhooks; recover and re-trigger outage for fresh enrichment |
 
 ## Teardown
