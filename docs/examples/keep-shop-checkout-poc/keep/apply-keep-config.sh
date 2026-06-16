@@ -2,25 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KEEP_API_URL="${KEEP_API_URL:-http://127.0.0.1:8080}"
+KEEP_API_URL="${KEEP_API_URL:-http://keep.local:30080/v2}"
 KEEP_API_KEY="${KEEP_API_KEY:-any-local-key}"
-# Token API: reachable from where you run this script (Kind default: graylog port-forward on 19000).
+# Graylog token API: reachable from where you run this script (Kind default: port-forward on 19000).
 GRAYLOG_API_URL="${GRAYLOG_API_URL:-http://127.0.0.1:19000}"
 # Keep backend queries Graylog in-cluster.
 GRAYLOG_DEPLOYMENT_URL="${GRAYLOG_DEPLOYMENT_URL:-http://graylog-service.logging.svc:9000}"
 GRAYLOG_USER="${GRAYLOG_USER:-admin}"
 GRAYLOG_PASSWORD="${GRAYLOG_PASSWORD:-admin}"
-
-auth_header() {
-  printf 'api_key:%s' "${KEEP_API_KEY}" | base64 -w0 2>/dev/null || printf 'api_key:%s' "${KEEP_API_KEY}" | base64
-}
-
-keep_curl() {
-  local method="$1"
-  local path="$2"
-  shift 2
-  curl -fsS -u "api_key:${KEEP_API_KEY}" -X "${method}" "${KEEP_API_URL}${path}" "$@"
-}
 
 create_graylog_token() {
   python3 - <<'PY' "${GRAYLOG_API_URL}" "${GRAYLOG_USER}" "${GRAYLOG_PASSWORD}"
@@ -88,10 +77,6 @@ auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).
 headers = {"Authorization": auth, "Content-Type": "application/json"}
 base = api_url.rstrip("/")
 
-REMOVED_RULE_NAMES = {
-    "Checkout demo service-side outage correlation",
-    "Payments API outage correlation",
-}
 SYNC_FIELDS = (
     "celQuery",
     "timeframeInSeconds",
@@ -105,6 +90,7 @@ SYNC_FIELDS = (
     "resolveOn",
 )
 
+
 def request(method, path, payload=None):
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(f"{base}{path}", data=data, method=method, headers=headers)
@@ -112,29 +98,20 @@ def request(method, path, payload=None):
         body = resp.read().decode()
         return json.loads(body) if body else {}
 
+
 def desired_view(rule):
     view = {field: rule.get(field) for field in SYNC_FIELDS}
-    grouping = view.get("groupingCriteria")
-    if grouping is None:
+    if view.get("groupingCriteria") is None:
         view["groupingCriteria"] = []
     return view
+
 
 existing = request("GET", "/rules")
 by_name = {}
 for rule in existing:
     by_name.setdefault(rule.get("name"), []).append(rule)
 
-desired = json.load(open(rules_path))
-desired_names = {rule["ruleName"] for rule in desired}
-
-for name, matches in by_name.items():
-    if name not in REMOVED_RULE_NAMES:
-        continue
-    for match in matches:
-        request("DELETE", f"/rules/{match['id']}")
-        print(f"rule deleted obsolete: {name} ({match['id']})")
-
-for rule in desired:
+for rule in json.load(open(rules_path)):
     name = rule["ruleName"]
     matches = by_name.get(name, [])
     if len(matches) > 1:
@@ -162,6 +139,40 @@ for rule in desired:
             print(f"rule exists: {name}")
         else:
             raise RuntimeError(f"failed to create rule {name}: {body}") from exc
+PY
+}
+
+install_python_provider() {
+  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
+import json
+import sys
+import urllib.error
+import urllib.request
+
+api_url, api_key = sys.argv[1:3]
+payload = {
+    "provider_id": "default-python",
+    "provider_name": "default-python",
+    "provider_type": "python",
+}
+req = urllib.request.Request(
+    f"{api_url.rstrip('/')}/providers/install",
+    data=json.dumps(payload).encode(),
+    method="POST",
+    headers={
+        "Authorization": "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode(),
+        "Content-Type": "application/json",
+    },
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        print(f"python provider installed ({resp.status})")
+except urllib.error.HTTPError as exc:
+    body = exc.read().decode()
+    if "already" in body.lower():
+        print("python provider already installed")
+    else:
+        raise RuntimeError(f"failed to install python provider: {body}") from exc
 PY
 }
 
@@ -226,7 +237,6 @@ base = api_url.rstrip("/")
 
 MAPPING_NAME = "shop-checkout-ops"
 MAPPING_DESCRIPTION = "PoC ops metadata (runbook, owner, tier) for shop-checkout services"
-# VictoriaMetrics webhook ingest keeps service in labels, not top-level service.
 MAPPING_MATCHERS = [["labels.service"]]
 MAPPING_PRIORITY = 10
 
@@ -239,29 +249,11 @@ def request(method, path, payload=None):
         return json.loads(body) if body else {}
 
 
-def read_rows(path):
-    with open(path, newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
-
-
-def desired_payload(rows):
-    return {
-        "name": MAPPING_NAME,
-        "description": MAPPING_DESCRIPTION,
-        "file_name": "shop-checkout-mapping.csv",
-        "matchers": MAPPING_MATCHERS,
-        "rows": rows,
-        "priority": MAPPING_PRIORITY,
-    }
-
-
 def comparable(mapping):
     return {
         "description": mapping.get("description"),
         "file_name": mapping.get("file_name"),
-        "matchers": sorted(
-            tuple(matcher) for matcher in (mapping.get("matchers") or [])
-        ),
+        "matchers": sorted(tuple(m) for m in (mapping.get("matchers") or [])),
         "priority": mapping.get("priority"),
         "rows": sorted(
             mapping.get("rows") or [],
@@ -270,13 +262,23 @@ def comparable(mapping):
     }
 
 
-rows = read_rows(csv_path)
-desired = desired_payload(rows)
+with open(csv_path, newline="", encoding="utf-8") as handle:
+    rows = list(csv.DictReader(handle))
+
+desired = {
+    "name": MAPPING_NAME,
+    "description": MAPPING_DESCRIPTION,
+    "file_name": "shop-checkout-mapping.csv",
+    "matchers": MAPPING_MATCHERS,
+    "rows": rows,
+    "priority": MAPPING_PRIORITY,
+}
+
 existing = request("GET", "/mapping")
-matches = [mapping for mapping in existing if mapping.get("name") == MAPPING_NAME]
+matches = [m for m in existing if m.get("name") == MAPPING_NAME]
 
 if len(matches) > 1:
-    matches.sort(key=lambda mapping: mapping.get("created_at") or "")
+    matches.sort(key=lambda m: m.get("created_at") or "")
     for duplicate in matches[1:]:
         request("DELETE", f"/mapping/{duplicate['id']}")
         print(f"mapping deleted duplicate: {MAPPING_NAME} ({duplicate['id']})")
@@ -351,6 +353,9 @@ install_rules
 
 echo "Installing alert mapping..."
 install_mapping
+
+echo "Installing Python provider (log formatting in Graylog workflows)..."
+install_python_provider || echo "Python provider install skipped."
 
 if kubectl get svc graylog-service -n logging >/dev/null 2>&1; then
   echo "Installing Graylog provider..."

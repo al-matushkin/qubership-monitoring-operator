@@ -20,6 +20,12 @@ workflow:
             timerange_type: relative
             page: 0
             per_page: 5
+    - name: format-log-snippet
+      provider:
+        type: python
+        config: "{{ providers.default-python }}"
+        with:
+          code: '"\\n".join([f"Related {{ alert.service }} logs in {{ alert.namespace }} (last 10m, newest first):"] + [f"{i}. {(m:=e.get(\"message\",e)).get(\"time\")} | {m.get(\"source_level\")} | {m.get(\"event\")} | pod={m.get(\"pod\")}" for i,e in enumerate({{ steps.fetch-shop-logs.results }}[:5], 1)])'
   actions:
     - name: enrich-with-logs
       provider:
@@ -27,12 +33,6 @@ workflow:
         with:
           enrich_alert:
             - key: log_snippet
-              value: |
-                Related {{ alert.service }} logs in {{ alert.namespace }} (last 10m, newest first):
-                1. {{ steps.fetch-shop-logs.results.0.message.time }} | {{ steps.fetch-shop-logs.results.0.message.source_level }} | {{ steps.fetch-shop-logs.results.0.message.event }} | pod={{ steps.fetch-shop-logs.results.0.message.pod }}
-                2. {{ steps.fetch-shop-logs.results.1.message.time }} | {{ steps.fetch-shop-logs.results.1.message.source_level }} | {{ steps.fetch-shop-logs.results.1.message.event }} | pod={{ steps.fetch-shop-logs.results.1.message.pod }}
-                3. {{ steps.fetch-shop-logs.results.2.message.time }} | {{ steps.fetch-shop-logs.results.2.message.source_level }} | {{ steps.fetch-shop-logs.results.2.message.event }} | pod={{ steps.fetch-shop-logs.results.2.message.pod }}
-                4. {{ steps.fetch-shop-logs.results.3.message.time }} | {{ steps.fetch-shop-logs.results.3.message.source_level }} | {{ steps.fetch-shop-logs.results.3.message.event }} | pod={{ steps.fetch-shop-logs.results.3.message.pod }}
-                5. {{ steps.fetch-shop-logs.results.4.message.time }} | {{ steps.fetch-shop-logs.results.4.message.source_level }} | {{ steps.fetch-shop-logs.results.4.message.event }} | pod={{ steps.fetch-shop-logs.results.4.message.pod }}
+              value: "{{ steps.format-log-snippet.results }}"
             - key: graylog_query
               value: 'application:"shop-checkout" AND service:"{{ alert.service }}" AND namespace:"{{ alert.namespace }}"'

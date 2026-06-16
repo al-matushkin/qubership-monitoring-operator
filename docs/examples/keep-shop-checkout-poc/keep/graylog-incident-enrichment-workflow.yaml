@@ -20,6 +20,12 @@ workflow:
             timerange_type: relative
             page: 0
             per_page: 10
+    - name: format-log-summary
+      provider:
+        type: python
+        config: "{{ providers.default-python }}"
+        with:
+          code: '"\\n".join(["Shop-checkout incident logs (last 10m, newest first):"] + [f"{i}. {(m:=e.get(\"message\",e)).get(\"time\")} | {m.get(\"service\")} | {m.get(\"source_level\")} | {m.get(\"event\")} | pod={m.get(\"pod\")}" for i,e in enumerate({{ steps.fetch-incident-logs.results }}[:10], 1)])'
   actions:
     - name: enrich-incident-with-logs
       provider:
@@ -27,17 +33,6 @@ workflow:
         with:
           enrich_incident:
             - key: log_summary
-              value: |
-                Shop-checkout incident logs (last 10m, newest first):
-                1. {{ steps.fetch-incident-logs.results.0.message.time }} | {{ steps.fetch-incident-logs.results.0.message.service }} | {{ steps.fetch-incident-logs.results.0.message.source_level }} | {{ steps.fetch-incident-logs.results.0.message.event }} | pod={{ steps.fetch-incident-logs.results.0.message.pod }}
-                2. {{ steps.fetch-incident-logs.results.1.message.time }} | {{ steps.fetch-incident-logs.results.1.message.service }} | {{ steps.fetch-incident-logs.results.1.message.source_level }} | {{ steps.fetch-incident-logs.results.1.message.event }} | pod={{ steps.fetch-incident-logs.results.1.message.pod }}
-                3. {{ steps.fetch-incident-logs.results.2.message.time }} | {{ steps.fetch-incident-logs.results.2.message.service }} | {{ steps.fetch-incident-logs.results.2.message.source_level }} | {{ steps.fetch-incident-logs.results.2.message.event }} | pod={{ steps.fetch-incident-logs.results.2.message.pod }}
-                4. {{ steps.fetch-incident-logs.results.3.message.time }} | {{ steps.fetch-incident-logs.results.3.message.service }} | {{ steps.fetch-incident-logs.results.3.message.source_level }} | {{ steps.fetch-incident-logs.results.3.message.event }} | pod={{ steps.fetch-incident-logs.results.3.message.pod }}
-                5. {{ steps.fetch-incident-logs.results.4.message.time }} | {{ steps.fetch-incident-logs.results.4.message.service }} | {{ steps.fetch-incident-logs.results.4.message.source_level }} | {{ steps.fetch-incident-logs.results.4.message.event }} | pod={{ steps.fetch-incident-logs.results.4.message.pod }}
-                6. {{ steps.fetch-incident-logs.results.5.message.time }} | {{ steps.fetch-incident-logs.results.5.message.service }} | {{ steps.fetch-incident-logs.results.5.message.source_level }} | {{ steps.fetch-incident-logs.results.5.message.event }} | pod={{ steps.fetch-incident-logs.results.5.message.pod }}
-                7. {{ steps.fetch-incident-logs.results.6.message.time }} | {{ steps.fetch-incident-logs.results.6.message.service }} | {{ steps.fetch-incident-logs.results.6.message.source_level }} | {{ steps.fetch-incident-logs.results.6.message.event }} | pod={{ steps.fetch-incident-logs.results.6.message.pod }}
-                8. {{ steps.fetch-incident-logs.results.7.message.time }} | {{ steps.fetch-incident-logs.results.7.message.service }} | {{ steps.fetch-incident-logs.results.7.message.source_level }} | {{ steps.fetch-incident-logs.results.7.message.event }} | pod={{ steps.fetch-incident-logs.results.7.message.pod }}
-                9. {{ steps.fetch-incident-logs.results.8.message.time }} | {{ steps.fetch-incident-logs.results.8.message.service }} | {{ steps.fetch-incident-logs.results.8.message.source_level }} | {{ steps.fetch-incident-logs.results.8.message.event }} | pod={{ steps.fetch-incident-logs.results.8.message.pod }}
-                10. {{ steps.fetch-incident-logs.results.9.message.time }} | {{ steps.fetch-incident-logs.results.9.message.service }} | {{ steps.fetch-incident-logs.results.9.message.source_level }} | {{ steps.fetch-incident-logs.results.9.message.event }} | pod={{ steps.fetch-incident-logs.results.9.message.pod }}
+              value: "{{ steps.format-log-summary.results }}"
             - key: graylog_query
               value: 'application:"shop-checkout" AND namespace:"shop"'
