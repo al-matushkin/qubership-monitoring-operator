@@ -43,6 +43,20 @@ backend:
   waitForDatabase:
     enabled: true
     port: 5432
+  # Default image CMD uses --workers 4; multiple Gunicorn workers race on correlation/topology
+  # and can create duplicate incidents (see README troubleshooting).
+  args:
+    - gunicorn
+    - keep.api.api:get_app
+    - --bind
+    - 0.0.0.0:8080
+    - --workers
+    - "1"
+    - -k
+    - uvicorn.workers.UvicornWorker
+    - -c
+    - /venv/lib/python3.13/site-packages/keep/api/config.py
+    - --preload
   env:
     - name: DATABASE_CONNECTION_STRING
       value: postgresql+psycopg2://postgres:keep-poc-password@keep-database:5432/keep

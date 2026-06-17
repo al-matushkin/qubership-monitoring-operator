@@ -15,11 +15,12 @@ auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).
 headers = {"Authorization": auth, "Content-Type": "application/json"}
 base = api_url.rstrip("/")
 
-incidents = json.loads(
+raw = json.loads(
     urllib.request.urlopen(urllib.request.Request(f"{base}/incidents?limit=100", headers=headers), timeout=30).read().decode()
 )
+incidents = raw if isinstance(raw, list) else raw.get("items", [])
 resolved = 0
-for incident in incidents.get("items", []):
+for incident in incidents:
     if incident.get("status") != "firing":
         continue
     body = json.dumps({"status": "resolved", "comment": comment}).encode()

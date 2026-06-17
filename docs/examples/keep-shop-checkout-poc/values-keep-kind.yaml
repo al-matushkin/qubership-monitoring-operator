@@ -24,6 +24,18 @@ database:
 backend:
   waitForDatabase:
     enabled: false
+  args:
+    - gunicorn
+    - keep.api.api:get_app
+    - --bind
+    - 0.0.0.0:8080
+    - --workers
+    - "1"
+    - -k
+    - uvicorn.workers.UvicornWorker
+    - -c
+    - /venv/lib/python3.13/site-packages/keep/api/config.py
+    - --preload
   env:
     - name: DATABASE_CONNECTION_STRING
       value: sqlite:////data/keep.db

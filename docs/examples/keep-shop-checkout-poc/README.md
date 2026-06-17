@@ -69,10 +69,10 @@ If Keep shows no alerts but VMAlertmanager does, check webhook delivery in VMAle
 
 This PoC enables **both** correlation mechanisms:
 
-| Type | Source | Name pattern | When it fires |
-|------|--------|--------------|---------------|
-| `rule` | `correlation-rules.json` | `shopchk-*` | On incident **created** when alerts match `application == shop-checkout` |
-| `topology` | `KEEP_TOPOLOGY_PROCESSOR` + `topology.yaml` | `Application incident: shop-checkout` | When multiple services in the same application alert together |
+| Type | Source | Name pattern | When it fires | Auto-resolve |
+|------|--------|--------------|---------------|--------------|
+| `rule` | `correlation-rules.json` | `shopchk-*` | On incident **created** when alerts match `application == shop-checkout` | `all_resolved` |
+| `topology` | `KEEP_TOPOLOGY_PROCESSOR` + `topology.yaml` | `Application incident: shop-checkout` | When multiple services in the same application alert together | `all_resolved` |
 
 Both can be active during an outage. To test only one path, disable the other in Keep UI or remove it from `apply-keep-config.sh`.
 
@@ -81,8 +81,22 @@ Both can be active during an outage. To test only one path, disable the other in
 1. **Group by application, not service** — `groupingCriteria` is `["application", "namespace"]`. Adding `"service"` splits incidents per service.
 2. **Alert labels** — every `PrometheusRule` sets `application: shop-checkout`, `namespace: shop`, and the correct `service` label.
 3. **Upstream health checks** — storefront treats checkout `backend_up=0` as unreachable so cascade scenarios also raise storefront alerts.
+4. **Auto-resolve** — `resolveOn: all_resolved` closes the rule incident when every linked alert is resolved (see below).
 
-Re-apply after edits:
+### Alert lifecycle, dedup, and when incidents resolve
+
+Keep learns alert state from **VMAlertmanager webhooks** (`send_resolved: true` on the `keep-shadow` receiver). VMAlertmanager notifies on state changes and repeats firing alerts on `repeat_interval` (5m in this PoC); Keep **deduplicates** identical repeat payloads so correlation and enrichment are not re-run every 5 minutes.
+
+**Preferred recovery cycle (do not skip steps):**
+
+1. Fix the app: `./shop-control.sh recover checkout-demo` (and other services if needed).
+2. Wait ~60–75s for VMAlertmanager to send **resolved** webhooks and for Keep to mark alerts resolved.
+3. Rule and topology incidents with `resolve_on: all_resolved` should close automatically once all linked alerts are resolved.
+4. If stale firing incidents remain (orphans, manual-resolve drift), run `./keep/resolve-stale-incidents.sh`.
+
+**Why manual resolve is dangerous:** resolving an alert or incident in the UI while VMAlertmanager still considers the alert **firing** tells Keep to stop tracking it. AM repeat webhooks are then **full duplicates** (same fingerprint + payload hash) and do **not** flip status back to firing. You get silent drift: metrics bad, AM firing, Keep quiet. Prefer `./shop-control.sh recover` and let `send_resolved` drive state; use `resolve-stale-incidents.sh` only after verified recovery or for known duplicate rows.
+
+Re-apply correlation rules after edits:
 
 ```bash
 KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
@@ -320,6 +334,9 @@ Switching between SQLite and Postgres starts a **fresh** database; re-run `apply
 | Graylog provider install fails from host | Port-forward Graylog on `19000`; token via `POST /api/users/{id}/tokens/keep-shop-poc` (Graylog 5) |
 | `log_summary` rows link to broken alert pages | Re-run `apply-keep-config.sh`; incident workflow must store `log_summary` as a string, not an array |
 | Stale `log_snippet` on firing alerts | Keep deduplicates repeat webhooks; recover and re-trigger outage for fresh enrichment |
+| Duplicate rule/topology incidents (`shopchk-4` + `shopchk-5`, twin topology rows) | Keep image defaults to Gunicorn `--workers 4`; PoC values set `--workers 1`. Re-run `./deploy-keep-ingress-kind.sh` after edits |
+| Orphan duplicate incident won't resolve (UI hangs) | Stale row lock from worker race; restart `keep-backend`, resolve once, or fix `alerts_count`/status in DB |
+| Keep quiet but shop still in outage / AM still firing | Manual resolve drift or deduped repeats; `./shop-control.sh recover`, wait for AM resolved webhooks, then `resolve-stale-incidents.sh` if needed — do not manual-resolve during an active outage |
 
 ## Teardown
 

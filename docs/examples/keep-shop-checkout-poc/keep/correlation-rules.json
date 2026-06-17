@@ -17,6 +17,6 @@
     "incidentPrefix": "shopchk",
     "groupDescription": "Correlate all shop-checkout alerts from every service into one application incident.",
     "requireApprove": false,
-    "resolveOn": "never"
+    "resolveOn": "all_resolved"
   }
 ]
