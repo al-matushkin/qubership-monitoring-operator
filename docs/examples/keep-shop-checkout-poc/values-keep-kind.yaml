@@ -44,6 +44,22 @@ backend:
     # as keep.db so pod restarts do not orphan provider rows in SQLite.
     - name: SECRET_MANAGER_DIRECTORY
       value: /data/secrets
+    # Helm chart replaces backend.env entirely — include Pusher/Soketi defaults or
+    # the API never pushes real-time events to the websocket server.
+    - name: PORT
+      value: "8080"
+    - name: PUSHER_APP_ID
+      value: "1"
+    - name: PUSHER_APP_KEY
+      value: keepappkey
+    - name: PUSHER_APP_SECRET
+      value: keepappsecret
+    - name: PUSHER_HOST
+      value: keep-websocket
+    - name: PUSHER_PORT
+      value: "6001"
+    - name: PROMETHEUS_MULTIPROC_DIR
+      value: /tmp/prometheus
     - name: KEEP_TOPOLOGY_PROCESSOR
       value: "true"
     - name: KEEP_TOPOLOGY_PROCESSOR_INTERVAL
@@ -72,6 +88,22 @@ backend:
 
 frontend:
   env:
+    # Helm chart replaces frontend.env entirely — include chart defaults or WebSocket
+    # (Pusher/Soketi) never connects and the UI needs manual refresh for updates.
+    - name: NEXTAUTH_SECRET
+      value: secret
+    - name: VERCEL
+      value: "1"
+    - name: ENV
+      value: development
+    - name: NODE_ENV
+      value: development
+    - name: HOSTNAME
+      value: 0.0.0.0
+    - name: PUSHER_APP_KEY
+      value: keepappkey
+    - name: FRIGADE_DISABLED
+      value: "true"
     # Default sidebar fields plus mapping (runbook_url, owner, escalation_tier) and Graylog query.
     # Mapping fields are top-level alert properties, not labels — see Keep ALERT_SIDEBAR_FIELDS.
     - name: ALERT_SIDEBAR_FIELDS

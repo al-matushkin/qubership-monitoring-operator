@@ -337,6 +337,7 @@ Switching between SQLite and Postgres starts a **fresh** database; re-run `apply
 | Duplicate rule/topology incidents (`shopchk-4` + `shopchk-5`, twin topology rows) | Keep image defaults to Gunicorn `--workers 4`; PoC values set `--workers 1`. Re-run `./deploy-keep-ingress-kind.sh` after edits |
 | Orphan duplicate incident won't resolve (UI hangs) | Stale row lock from worker race; restart `keep-backend`, resolve once, or fix `alerts_count`/status in DB |
 | Keep quiet but shop still in outage / AM still firing | Manual resolve drift or deduped repeats; `./shop-control.sh recover`, wait for AM resolved webhooks, then `resolve-stale-incidents.sh` if needed — do not manual-resolve during an active outage |
+| Incidents/alerts need manual refresh; no WebSocket in DevTools | PoC `frontend.env` / `backend.env` must include chart defaults (`PUSHER_APP_KEY`, `PUSHER_HOST=keep-websocket`, …). Re-run `./deploy-keep-ingress-kind.sh`. DevTools: **Socket** filter (not text search `ws`). Menu badge may update via HTTP polling while the list stays stale without push |
 
 ## Teardown
 
