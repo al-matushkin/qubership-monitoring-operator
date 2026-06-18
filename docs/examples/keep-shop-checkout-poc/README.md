@@ -94,6 +94,8 @@ Keep learns alert state from **VMAlertmanager webhooks** (`send_resolved: true` 
 3. Rule and topology incidents with `resolve_on: all_resolved` should close automatically once all linked alerts are resolved.
 4. If stale firing incidents remain (orphans, manual-resolve drift), run `./keep/resolve-stale-incidents.sh`.
 
+**Alert timing:** availability/latency alerts (`*_up`, `*_latency_seconds`) clear soon after recover (~60–90s). `CheckoutDemoHighErrorRatio` uses a **5m rolling rate** over `checkout_requests_total` (not the lifetime `checkout_error_ratio` gauge in `/status`), so it clears within ~5–6 minutes after recover — even after a long outage.
+
 **Why manual resolve is dangerous:** resolving an alert or incident in the UI while VMAlertmanager still considers the alert **firing** tells Keep to stop tracking it. AM repeat webhooks are then **full duplicates** (same fingerprint + payload hash) and do **not** flip status back to firing. You get silent drift: metrics bad, AM firing, Keep quiet. Prefer `./shop-control.sh recover` and let `send_resolved` drive state; use `resolve-stale-incidents.sh` only after verified recovery or for known duplicate rows.
 
 Re-apply correlation rules after edits:
@@ -259,7 +261,7 @@ Control demo services with [`shop-control.sh`](shop-control.sh) (`wget` inside e
 | Payments outage | `./shop-control.sh trigger-outage payments-api` | Payments + checkout (+ storefront) alerts |
 | Storefront slow mode | `./shop-control.sh slow-mode storefront` | Latency alert on storefront |
 | Recover one service | `./shop-control.sh recover <service>` | That service’s alerts resolve in VMAlertmanager |
-| Recover all | `./shop-control.sh recover storefront payments-api checkout-demo` | Full recovery (~60–90s for VMAlertmanager; Keep may lag) |
+| Recover all | `./shop-control.sh recover storefront payments-api checkout-demo` | Availability/latency ~60–90s; error-ratio alert up to ~5–6m (5m rate window) |
 
 Direct equivalent:
 
@@ -337,6 +339,7 @@ Switching between SQLite and Postgres starts a **fresh** database; re-run `apply
 | Duplicate rule/topology incidents (`shopchk-4` + `shopchk-5`, twin topology rows) | Keep image defaults to Gunicorn `--workers 4`; PoC values set `--workers 1`. Re-run `./deploy-keep-ingress-kind.sh` after edits |
 | Orphan duplicate incident won't resolve (UI hangs) | Stale row lock from worker race; restart `keep-backend`, resolve once, or fix `alerts_count`/status in DB |
 | Keep quiet but shop still in outage / AM still firing | Manual resolve drift or deduped repeats; `./shop-control.sh recover`, wait for AM resolved webhooks, then `resolve-stale-incidents.sh` if needed — do not manual-resolve during an active outage |
+| Incidents stuck after recover (`CheckoutDemoHighErrorRatio`) | Alert uses `rate(checkout_requests_total[5m])`, not lifetime `/status` `error_ratio`; wait ~5–6m or `kubectl -n shop rollout restart deploy/checkout-demo` to speed up |
 | Incidents/alerts need manual refresh; no WebSocket in DevTools | PoC `frontend.env` / `backend.env` must include chart defaults (`PUSHER_APP_KEY`, `PUSHER_HOST=keep-websocket`, …). Re-run `./deploy-keep-ingress-kind.sh`. DevTools: **Socket** filter (not text search `ws`). Menu badge may update via HTTP polling while the list stays stale without push |
 
 ## Teardown

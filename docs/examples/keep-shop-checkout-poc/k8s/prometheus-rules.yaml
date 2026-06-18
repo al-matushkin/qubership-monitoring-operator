@@ -27,9 +27,14 @@ spec:
             team: payments
         - alert: CheckoutDemoHighErrorRatio
           annotations:
-            description: checkout-demo reports more than 20% synthetic 5xx responses.
+            description: More than 20% of checkout-demo synthetic responses were 5xx over the last 5 minutes (rate over checkout_requests_total).
             summary: Checkout demo error ratio is high
-          expr: checkout_error_ratio{service="checkout-demo", namespace="shop", application="shop-checkout"} > 0.2
+          expr: |
+            (
+              sum(rate(checkout_requests_total{service="checkout-demo", namespace="shop", application="shop-checkout", code="500"}[5m]))
+              /
+              sum(rate(checkout_requests_total{service="checkout-demo", namespace="shop", application="shop-checkout", code=~"200|500"}[5m]))
+            ) > 0.2
           for: 30s
           labels:
             application: shop-checkout

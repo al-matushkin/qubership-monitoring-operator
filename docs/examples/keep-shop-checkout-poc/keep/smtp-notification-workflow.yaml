@@ -11,7 +11,7 @@ workflow:
         - created
   actions:
     - name: send-shop-checkout-rule-incident-email
-      if: "'{{ incident.incident_type }}' == 'rule' and ('{{ incident.status }}' contains 'FIRING' or '{{ incident.status }}' contains 'firing')"
+      if: "'{{ incident.incident_type }}' == 'rule' and ('{{ incident.status }}' == 'IncidentStatus.FIRING' or '{{ incident.status }}' == 'firing')"
       provider:
         type: smtp
         config: "{{ providers.smtp-poc }}"

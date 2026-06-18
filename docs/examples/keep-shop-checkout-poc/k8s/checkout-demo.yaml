@@ -128,7 +128,7 @@ data:
                         "# HELP checkout_backend_up Whether checkout backend is healthy.",
                         "# TYPE checkout_backend_up gauge",
                         f'checkout_backend_up{{service="{SERVICE}",namespace="{NAMESPACE}",team="{TEAM}",application="{APPLICATION}"}} {state["backend_up"]}',
-                        "# HELP checkout_error_ratio Current synthetic checkout 5xx ratio.",
+                        "# HELP checkout_error_ratio Lifetime synthetic 5xx ratio (status only; alerts use rate(checkout_requests_total[5m])).",
                         "# TYPE checkout_error_ratio gauge",
                         f'checkout_error_ratio{{service="{SERVICE}",namespace="{NAMESPACE}",team="{TEAM}",application="{APPLICATION}"}} {state["error_ratio"]}',
                         "# HELP checkout_p99_latency_seconds Current synthetic checkout p99 latency.",
