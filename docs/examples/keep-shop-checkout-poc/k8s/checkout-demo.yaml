@@ -21,6 +21,13 @@ data:
     APPLICATION = "shop-checkout"
     TEAM = "payments"
     PAYMENTS_URL = "http://payments-api.shop.svc:8080/charge"
+    # Stagger synthetic symptoms so alerts cascade (avoids same-second correlation races).
+    OUTAGE_LATENCY_DELAY_SECONDS = 15
+    OUTAGE_ERROR_BURST_DELAY_SECONDS = 20
+    PAYMENTS_FAILURE_GRACE_SECONDS = 12
+    PAYMENTS_FAILURE_LATENCY_DELAY_SECONDS = 15
+    PAYMENTS_FAILURE_ERROR_BURST_DELAY_SECONDS = 20
+    TRAFFIC_INTERVAL_SECONDS = 2
 
     state = {
         "mode": "normal",
@@ -29,6 +36,8 @@ data:
         "latency": 0.12,
         "backend_up": 1,
         "payment_failures": 0,
+        "outage_started_at": None,
+        "payments_unhealthy_since": None,
     }
     lock = threading.Lock()
 
@@ -71,13 +80,17 @@ data:
             with lock:
                 mode = state["mode"]
             if mode == "outage":
+                started = state.get("outage_started_at") or time.time()
+                elapsed = time.time() - started
                 with lock:
-                    state["requests_total"]["500"] += 5
-                    state["requests_total"]["200"] += 1
+                    state["backend_up"] = 0
+                    if elapsed >= OUTAGE_ERROR_BURST_DELAY_SECONDS:
+                        state["requests_total"]["500"] += 5
+                        state["requests_total"]["200"] += 1
+                    if elapsed >= OUTAGE_LATENCY_DELAY_SECONDS:
+                        state["latency"] = 4.2
                     total = state["requests_total"]["200"] + state["requests_total"]["500"]
                     state["error_ratio"] = state["requests_total"]["500"] / max(total, 1)
-                    state["latency"] = 4.2
-                    state["backend_up"] = 0
                 log_event(
                     "ERROR",
                     "checkout_outage_active",
@@ -86,15 +99,40 @@ data:
                 )
             else:
                 payment_ok = charge_payments(request_id)
+                now = time.time()
                 with lock:
-                    state["requests_total"]["200"] += 10 if payment_ok else 5
-                    if not payment_ok:
-                        state["requests_total"]["500"] += 5
+                    if payment_ok:
+                        state["payments_unhealthy_since"] = None
+                        state["requests_total"]["200"] += 10
+                        state["latency"] = 0.12
+                        state["backend_up"] = 1
+                    else:
+                        if state["payments_unhealthy_since"] is None:
+                            state["payments_unhealthy_since"] = now
+                        unhealthy_for = now - state["payments_unhealthy_since"]
+                        state["requests_total"]["200"] += 5
+                        if unhealthy_for >= PAYMENTS_FAILURE_ERROR_BURST_DELAY_SECONDS:
+                            state["requests_total"]["500"] += 5
+                        state["latency"] = (
+                            2.5 if unhealthy_for >= PAYMENTS_FAILURE_LATENCY_DELAY_SECONDS else 0.12
+                        )
+                        if unhealthy_for >= PAYMENTS_FAILURE_GRACE_SECONDS:
+                            state["backend_up"] = 0
+                        else:
+                            state["backend_up"] = 1
+                            log_event(
+                                "WARN",
+                                "payments_charge_degraded",
+                                "payments-api charge failing; grace before checkout marks down",
+                                request_id=request_id,
+                                downstream="payments-api",
+                                grace_remaining_seconds=max(
+                                    0, int(PAYMENTS_FAILURE_GRACE_SECONDS - unhealthy_for)
+                                ),
+                            )
                     total = state["requests_total"]["200"] + state["requests_total"]["500"]
                     state["error_ratio"] = state["requests_total"]["500"] / max(total, 1)
-                    state["latency"] = 0.12 if payment_ok else 2.5
-                    state["backend_up"] = 1 if payment_ok else 0
-            time.sleep(1)
+            time.sleep(TRAFFIC_INTERVAL_SECONDS)
 
     class Handler(BaseHTTPRequestHandler):
         def _write(self, code, body, content_type="text/plain"):
@@ -108,12 +146,20 @@ data:
             if self.path == "/trigger-outage":
                 with lock:
                     state["mode"] = "outage"
+                    state["outage_started_at"] = time.time()
                 log_event("ERROR", "checkout_outage_started", "checkout-demo switched to outage mode", request_id=request_id)
                 self._write(200, "checkout-demo switched to outage mode\n")
                 return
             if self.path == "/recover":
                 with lock:
                     state["mode"] = "normal"
+                    state["outage_started_at"] = None
+                    state["payments_unhealthy_since"] = None
+                    state["latency"] = 0.12
+                    state["backend_up"] = 1
+                    state["requests_total"] = {"200": 0, "500": 0}
+                    state["error_ratio"] = 0.0
+                    state["payment_failures"] = 0
                 log_event("INFO", "checkout_recovered", "checkout-demo recovered", request_id=request_id)
                 self._write(200, "checkout-demo recovered\n")
                 return

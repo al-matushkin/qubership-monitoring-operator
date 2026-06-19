@@ -236,7 +236,7 @@ headers = {"Authorization": auth, "Content-Type": "application/json"}
 base = api_url.rstrip("/")
 
 MAPPING_NAME = "shop-checkout-ops"
-MAPPING_DESCRIPTION = "PoC ops metadata (runbook, owner, tier) for shop-checkout services"
+MAPPING_DESCRIPTION = "PoC ops metadata (runbook, owner, tier, environment, repository) for shop-checkout services"
 MAPPING_MATCHERS = [["labels.service"]]
 MAPPING_PRIORITY = 10
 
@@ -364,6 +364,22 @@ if kubectl get svc graylog-service -n logging >/dev/null 2>&1; then
   install_workflow "${ROOT_DIR}/keep/graylog-enrichment-workflow.yaml" || echo "Graylog alert workflow install skipped."
   echo "Installing Graylog incident enrichment workflow..."
   install_workflow "${ROOT_DIR}/keep/graylog-incident-enrichment-workflow.yaml" || echo "Graylog incident workflow install skipped."
+  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
+import json, sys, urllib.request
+api_url, api_key = sys.argv[1:3]
+auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
+headers = {"Authorization": auth}
+req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
+for w in json.load(urllib.request.urlopen(req, timeout=20)):
+    if w.get("name") == "Shop checkout Graylog incident enrichment":
+        del_req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE")
+        try:
+            urllib.request.urlopen(del_req, timeout=20)
+            print(f"retired workflow: {w['id']}")
+        except Exception as exc:
+            print(f"workflow {w['id']} not removed: {exc}")
+        break
+PY
 else
   echo "Graylog service not found in logging namespace; skipping provider/workflow install."
   echo "Re-run this script after deploying the logging stack."
@@ -372,9 +388,24 @@ fi
 if kubectl get svc mailpit -n keep >/dev/null 2>&1; then
   echo "Installing SMTP provider (Mailpit)..."
   install_smtp_provider || echo "SMTP provider install skipped."
-  echo "Installing SMTP notification workflows (rule + topology)..."
+  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
+import json, sys, urllib.request
+api_url, api_key = sys.argv[1:3]
+auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
+headers = {"Authorization": auth}
+req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
+for w in json.load(urllib.request.urlopen(req, timeout=20)):
+    if w.get("id") == "shop-checkout-smtp-topology-notification" or w.get("name") == "Shop checkout SMTP notification (topology)":
+        del_req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE")
+        try:
+            urllib.request.urlopen(del_req, timeout=20)
+            print(f"retired workflow: {w['id']}")
+        except Exception as exc:
+            print(f"workflow {w['id']} not removed: {exc}")
+        break
+PY
+  echo "Installing SMTP notification workflow (rule incidents only)..."
   install_workflow "${ROOT_DIR}/keep/smtp-notification-workflow.yaml" || echo "SMTP rule workflow install skipped."
-  install_workflow "${ROOT_DIR}/keep/smtp-topology-notification-workflow.yaml" || echo "SMTP topology workflow install skipped."
 else
   echo "Mailpit service not found in keep namespace; skipping SMTP notification PoC."
   echo "Deploy with: kubectl apply -f k8s/mailpit.yaml"

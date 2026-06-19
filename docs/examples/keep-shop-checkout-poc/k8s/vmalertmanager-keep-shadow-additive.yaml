@@ -15,7 +15,7 @@ spec:
   receivers:
     - name: keep-shadow
       webhook_configs:
-        - url: http://keep-backend.keep.svc:8080/alerts/event/victoriametrics
+        - url: http://keep-backend.keep.svc:8080/alerts/event/prometheus
           send_resolved: true
           http_config:
             basic_auth:

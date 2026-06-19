@@ -21,7 +21,7 @@ Keep integration:
 | Log context | Graylog provider + alert workflow (`log_snippet`) + incident workflow (`log_summary`) |
 | Rule incidents | App-level correlation rule (`keep/correlation-rules.json`) → `shopchk-*` |
 | Topology incidents | Topology processor groups alerts by application → `Application incident: shop-checkout` |
-| Notifications | Mailpit SMTP (optional) — rule + topology workflows |
+| Notifications | Mailpit SMTP (optional) — **rule** incidents only (`shopchk-*` on `created`) |
 
 Grafana and Jaeger are intentionally excluded.
 
@@ -35,8 +35,8 @@ vmalert  →  VMAlertmanager  →  receiver keep-shadow (webhook_configs)  →  
 
 | Piece | Value (PoC) |
 |-------|-------------|
-| Keep ingest URL | `http://keep-backend.keep.svc:8080/alerts/event/victoriametrics` |
-| Alternate URL | `/alerts/event/prometheus` — same Alertmanager JSON payload; also used on some Kind setups |
+| Keep ingest URL | `http://keep-backend.keep.svc:8080/alerts/event/prometheus` |
+| Alternate URL | `/alerts/event/victoriametrics` — same Alertmanager JSON payload, but Keep 0.52.x **does not** promote `labels.*` to top-level alert fields (`application`, `namespace`, `service`, …). Correlation CEL and mapping matchers break if you use this path. |
 | Auth | HTTP Basic: username `api_key`, password = Keep API key (`any-local-key` in the local PoC) |
 | Receiver name | `keep-shadow` (convention only; any name works) |
 | Resolved alerts | Set `send_resolved: true` so Keep auto-resolves when VMAlertmanager clears an alert |
@@ -74,12 +74,14 @@ This PoC enables **both** correlation mechanisms:
 | `rule` | `correlation-rules.json` | `shopchk-*` | On incident **created** when alerts match `application == shop-checkout` | `all_resolved` |
 | `topology` | `KEEP_TOPOLOGY_PROCESSOR` + `topology.yaml` | `Application incident: shop-checkout` | When multiple services in the same application alert together | `all_resolved` |
 
-Both can be active during an outage. To test only one path, disable the other in Keep UI or remove it from `apply-keep-config.sh`.
+Both can be active during an outage. **Workflows target rule incidents only** (`shopchk-*` on `created`). The topology incident is **graph + linked alerts only** — no SMTP or Graylog rollup.
+
+To test only one path, disable the other in Keep UI or remove it from `apply-keep-config.sh`.
 
 **Rule incident requirements** (`correlation-rules.json` ships a single app-level rule):
 
 1. **Group by application, not service** — `groupingCriteria` is `["application", "namespace"]`. Adding `"service"` splits incidents per service.
-2. **Alert labels** — every `PrometheusRule` sets `application: shop-checkout`, `namespace: shop`, and the correct `service` label.
+2. **Alert labels** — every `PrometheusRule` sets `application: shop-checkout`, `namespace: shop`, and the correct `service` label (used as the mapping join key).
 3. **Upstream health checks** — storefront treats checkout `backend_up=0` as unreachable so cascade scenarios also raise storefront alerts.
 4. **Auto-resolve** — `resolveOn: all_resolved` closes the rule incident when every linked alert is resolved (see below).
 
@@ -104,9 +106,15 @@ Re-apply correlation rules after edits:
 KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
 ```
 
-### Alert mapping (runbook / owner / tier)
+### Alert mapping (runbook / owner / tier / environment / repository)
 
-`keep/shop-checkout-mapping.csv` joins on `labels.service` (VictoriaMetrics webhook ingest keeps `service` in labels) and adds `runbook_url`, `owner`, and `escalation_tier` to each shop alert in Keep.
+`keep/shop-checkout-mapping.csv` joins on `labels.service` (VictoriaMetrics webhook ingest keeps `service` in labels) and adds **one row per service**: `runbook_url`, `owner`, `escalation_tier`, `environment`, and `repository` (Git repo URL). Keep applies these at alert ingest; the incident overview **Environments** and **Repositories** fields aggregate the enriched alert properties — no duplication on each `PrometheusRule`.
+
+**Why not on alert rules?** Ops metadata belongs in a service catalog (CSV, CMDB, or topology), not repeated on every alert definition. Prometheus rules should stay focused on signal (`severity`, `symptom`, `team`).
+
+**Why `/prometheus` and not `/victoriametrics`?** Same Alertmanager webhook body, different Keep parser. The Prometheus ingest path promotes alert labels to **top-level** fields (`application`, `namespace`, `service`, …). The shop correlation rule CEL is `application == "shop-checkout" && namespace == "shop"` — that only works when those fields are top-level. VictoriaMetrics ingest leaves them under `labels` only, so rule incidents stop matching. Ops metadata (`repository`, `environment`, runbook) still comes from **mapping CSV**, not from the webhook path.
+
+**From the workload (production path):** put `environment` / `repository` on Deployment pod labels and join via Keep mapping on `labels.service` — no need to duplicate URLs on PrometheusRule labels.
 
 **Where the fields land:** mapping adds **top-level** alert properties, not entries under **Labels** in the UI. Check the **alert sidebar** (after `ALERT_SIDEBAR_FIELDS` in `values-keep-kind.yaml`) or the API:
 
@@ -115,7 +123,7 @@ curl -u 'api_key:any-local-key' \
   'http://keep.local:30080/v2/alerts?status=firing&limit=5' | jq '.[] | {name, runbook_url, owner, escalation_tier, enriched_fields}'
 ```
 
-`enriched_fields` lists applied enrichments (mapping: `runbook_url`, `owner`, `escalation_tier`; Graylog workflow: `log_snippet`, `graylog_query`).
+`enriched_fields` lists applied enrichments (mapping: `runbook_url`, `owner`, `escalation_tier`, `environment`, `repository`; Graylog workflow: `log_snippet`, `graylog_query`).
 
 **Workflows:** mapping fields are available in workflow expressions, e.g. `{{ alert.runbook_url }}`.
 
@@ -127,7 +135,7 @@ curl -u 'api_key:any-local-key' \
 
 **Extraction rules are not required** for this PoC. VMAlert/Alertmanager delivers structured labels and `description`; mapping and Graylog workflows add ops/log fields. Extend **`ALERT_SIDEBAR_FIELDS`** in `values-keep-kind-postgres.yaml` (e.g. `log_snippet`, `symptom`, `pod`) rather than adding regex extraction. See checklist item 5 in [`follow-up-checklist.md`](../../keep/follow-up-checklist.md).
 
-**Incident log rollup:** `graylog-incident-enrichment-workflow.yaml` runs on incident `created`/`updated`, queries Graylog for all `shop-checkout` logs in `shop`, formats hits with the built-in **Python provider** (`default-python`), and sets incident enrichments `log_summary` + `graylog_query`. `log_summary` is a **single string** with `- ` prefixed lines (Keep 0.52.x treats array enrichments as clickable alert-filter badges, so do not store logs as an array). Per-alert `log_snippet` uses bullet separators (` • `) in `graylog-enrichment-workflow.yaml`.
+**Incident log rollup:** `graylog-incident-enrichment-workflow.yaml` runs on **rule** `incident:created`, waits until `alerts_count >= 2`, then sets `log_summary` + `graylog_query`. Per-alert `log_snippet` still comes from `graylog-enrichment-workflow.yaml` (`type: alert`).
 
 ### Keep persistence + ingress (Kind)
 
@@ -256,18 +264,45 @@ Control demo services with [`shop-control.sh`](shop-control.sh) (`wget` inside e
 
 | Action | Command | Expected result |
 |--------|---------|-----------------|
-| Storefront outage | `./shop-control.sh trigger-outage storefront` | Storefront alerts; rule and/or topology incident |
-| Checkout outage | `./shop-control.sh trigger-outage checkout-demo` | Checkout + storefront alerts; correlated incident(s) |
-| Payments outage | `./shop-control.sh trigger-outage payments-api` | Payments + checkout (+ storefront) alerts |
+| **Full cascade (3 services)** | `./shop-control.sh trigger-cascade` | payments → checkout → storefront alerts; one `shopchk-*` incident |
+| Storefront outage | `./shop-control.sh trigger-outage storefront` | Storefront alerts only |
+| Checkout outage | `./shop-control.sh trigger-outage checkout-demo` | Checkout + storefront (payments stays healthy) |
+| Payments outage | `./shop-control.sh trigger-outage payments-api` | Same as `trigger-cascade` |
 | Storefront slow mode | `./shop-control.sh slow-mode storefront` | Latency alert on storefront |
 | Recover one service | `./shop-control.sh recover <service>` | That service’s alerts resolve in VMAlertmanager |
-| Recover all | `./shop-control.sh recover storefront payments-api checkout-demo` | Availability/latency ~60–90s; error-ratio alert up to ~5–6m (5m rate window) |
+| Recover all | `./shop-control.sh recover` (no args — all three, upstream first) or explicit service list |
 
 Direct equivalent:
 
 ```bash
 kubectl -n shop exec deploy/checkout-demo -- wget -qO- http://127.0.0.1:8080/trigger-outage
 kubectl -n shop exec deploy/checkout-demo -- wget -qO- http://127.0.0.1:8080/recover
+```
+
+### Cascading outage timing
+
+Symptoms are **staggered** (~10–20s app delays between hops) so alerts do not all land in the same second; Prometheus `for: 30s` still adds ~30–45s before each alert fires.
+
+**Full chain (recommended):** `./shop-control.sh trigger-cascade` — root failure at **payments-api** (`storefront → checkout-demo → payments-api`):
+
+| Phase | When | What happens |
+|-------|------|----------------|
+| Root failure | T+0 | `payments_up=0` (payments-api outage) |
+| Payments alert | ~T+30–45s | `PaymentsApiUnavailable` (`for: 30s`) |
+| Checkout grace | ~T+2s → T+14s | Checkout charges every **2s**, **12s** grace before `backend_up=0` |
+| Checkout alert | ~T+44–60s | `CheckoutDemoTargetDown` |
+| Storefront grace | after checkout down | Poll every **3s**, **12s** grace before `storefront_up=0` |
+| Storefront alert | ~T+56–75s | `StorefrontCheckoutUnreachable` |
+| Checkout latency | T+15s after payments fail | `CheckoutDemoLatencyHigh` ~T+45–60s |
+| Error-ratio alerts | ~T+5–6m | 5m Prometheus rate windows |
+
+**Checkout-only outage** (`trigger-outage checkout-demo`): checkout **15s / 20s** symptom ramp + storefront **12s** grace; **payments-api stays healthy**.
+
+Tune delays in `k8s/payments-api.yaml`, `k8s/checkout-demo.yaml` (`PAYMENTS_FAILURE_*`, `OUTAGE_*`), and `k8s/storefront.yaml` (`POLL_INTERVAL_SECONDS`, `DOWNSTREAM_GRACE_SECONDS`). After edits:
+
+```bash
+kubectl apply -f k8s/payments-api.yaml -f k8s/checkout-demo.yaml -f k8s/storefront.yaml
+kubectl -n shop rollout restart deploy/payments-api deploy/checkout-demo deploy/storefront
 ```
 
 ## Artifacts
@@ -284,24 +319,20 @@ kubectl -n shop exec deploy/checkout-demo -- wget -qO- http://127.0.0.1:8080/rec
 | `keep/correlation-rules.json` | Single app-level correlation rule |
 | `keep/shop-checkout-mapping.csv` | Service → runbook/owner/tier mapping |
 | `keep/graylog-enrichment-workflow.yaml` | Per-alert log enrichment (`enrich_alert`; Python formats `log_snippet`) |
-| `keep/graylog-incident-enrichment-workflow.yaml` | Per-incident log rollup (`enrich_incident`; Python formats `log_summary`) |
+| `keep/graylog-incident-enrichment-workflow.yaml` | Rule `incident:created` — wait for ≥2 alerts, then `log_summary` rollup |
 | `k8s/mailpit.yaml` | Local SMTP catcher (port 1025) + web UI (8025) |
 | `keep/smtp-notification-workflow.yaml` | SMTP on `shopchk-*` rule incident `created` |
-| `keep/smtp-topology-notification-workflow.yaml` | SMTP on topology incident `updated` (one email per episode) |
 | `keep/test-smtp-notification.sh` | Verify rule-incident SMTP delivery via Mailpit |
 | `keep/resolve-stale-incidents.sh` | Bulk-resolve firing incidents (cleanup helper) |
 | `keep/apply-keep-config.sh` | Apply topology, rules, mapping, providers, workflows |
-| `shop-control.sh` | Trigger outage / recover / slow-mode |
+| `shop-control.sh` | Trigger cascade / outage / recover / slow-mode |
 | `validate.sh` | End-to-end validation |
 
 ### SMTP notification (item 7)
 
 Optional: deploy Mailpit first (`kubectl apply -f k8s/mailpit.yaml`), then re-run `apply-keep-config.sh`.
 
-Two workflows (one email per incident episode, not per alert):
-
-- **Rule** (`smtp-notification-workflow.yaml`) — trigger `incident:created` for `incident_type == rule` (`shopchk-*`).
-- **Topology** (`smtp-topology-notification-workflow.yaml`) — trigger `incident:updated` for `incident_type == topology`. Guards duplicate sends with `topology_smtp_sent`, read via HTTP `GET http://keep-backend:8080/incidents/{id}` (`steps.fetch-incident-enrichment.results.body.topology_smtp_sent`). Do **not** use `incident.enrichments.*` in `if` conditions (UUID hyphen mismatch in Keep 0.52.x). Flag is set/cleared via `POST .../enrich`.
+One workflow — email on **`shopchk-*` rule incident `created`** (`smtp-notification-workflow.yaml`). Topology incidents do not send email.
 
 Verify: `./keep/test-smtp-notification.sh` (Mailpit UI: port-forward `8025` → `http://127.0.0.1:18025/`).
 
@@ -336,7 +367,8 @@ Switching between SQLite and Postgres starts a **fresh** database; re-run `apply
 | Graylog provider install fails from host | Port-forward Graylog on `19000`; token via `POST /api/users/{id}/tokens/keep-shop-poc` (Graylog 5) |
 | `log_summary` rows link to broken alert pages | Re-run `apply-keep-config.sh`; incident workflow must store `log_summary` as a string, not an array |
 | Stale `log_snippet` on firing alerts | Keep deduplicates repeat webhooks; recover and re-trigger outage for fresh enrichment |
-| Duplicate rule/topology incidents (`shopchk-4` + `shopchk-5`, twin topology rows) | Keep image defaults to Gunicorn `--workers 4`; PoC values set `--workers 1`. Re-run `./deploy-keep-ingress-kind.sh` after edits |
+| Recover after cascade | `./shop-control.sh recover` with no args now recovers **all three** (payments-api first). `./shop-control.sh recover checkout-demo` alone leaves payments in outage and checkout keeps failing charges |
+| Duplicate rule/topology incidents (`shopchk-4` + `shopchk-5`, twin topology rows) | Keep image defaults to Gunicorn `--workers 4`; PoC values set `--workers 1`. Re-run `./deploy-keep-ingress-kind.sh` after edits. Also caused by **same-second** alert batches — use staggered cascade timing (see [Cascading outage timing](#cascading-outage-timing-checkout-demo-trigger)) |
 | Orphan duplicate incident won't resolve (UI hangs) | Stale row lock from worker race; restart `keep-backend`, resolve once, or fix `alerts_count`/status in DB |
 | Keep quiet but shop still in outage / AM still firing | Manual resolve drift or deduped repeats; `./shop-control.sh recover`, wait for AM resolved webhooks, then `resolve-stale-incidents.sh` if needed — do not manual-resolve during an active outage |
 | Incidents stuck after recover (`CheckoutDemoHighErrorRatio`) | Alert uses `rate(checkout_requests_total[5m])`, not lifetime `/status` `error_ratio`; wait ~5–6m or `kubectl -n shop rollout restart deploy/checkout-demo` to speed up |

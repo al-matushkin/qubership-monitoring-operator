@@ -1,4 +1,4 @@
-labels.service,runbook_url,owner,escalation_tier
-storefront,https://wiki.example/shop/storefront,payments-oncall,P2
-checkout-demo,https://wiki.example/shop/checkout,payments-oncall,P1
-payments-api,https://wiki.example/shop/payments,payments-oncall,P1
+labels.service,runbook_url,owner,escalation_tier,environment,repository
+storefront,https://wiki.example/shop/storefront,payments-oncall,P2,kind-local,https://github.com/example/shop-storefront
+checkout-demo,https://wiki.example/shop/checkout,payments-oncall,P1,kind-local,https://github.com/example/shop-checkout
+payments-api,https://wiki.example/shop/payments,payments-oncall,P1,kind-local,https://github.com/example/shop-payments-api

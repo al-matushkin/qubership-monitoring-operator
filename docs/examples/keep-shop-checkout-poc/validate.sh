@@ -98,10 +98,10 @@ if not services.get("payments-api", {}).get("dependencies"):
 print("[PASS] Keep topology contains shop-checkout services (processor-ready)")
 PY
 
-echo "5) Triggering checkout-demo outage..."
-"${ROOT_DIR}/shop-control.sh" trigger-outage checkout-demo
+echo "5) Triggering full shop-checkout cascade (payments-api root)..."
+"${ROOT_DIR}/shop-control.sh" trigger-cascade
 
-echo "Waiting for alerts to propagate..."
+echo "Waiting for alerts to propagate across all three services..."
 sleep 90
 
 echo "6) Checking VMAlertmanager firing alerts..."
@@ -117,9 +117,11 @@ shop_alerts = [
     if a.get("labels", {}).get("namespace") == "shop"
     and a.get("status", {}).get("state") == "active"
 ]
-if len(shop_alerts) < 2:
-    raise SystemExit(f"expected >=2 firing shop alerts, got {len(shop_alerts)}")
+if len(shop_alerts) < 3:
+    raise SystemExit(f"expected >=3 firing shop alerts (full cascade), got {len(shop_alerts)}")
 services = sorted({a["labels"].get("service") for a in shop_alerts})
+if len(services) < 3:
+    raise SystemExit(f"expected alerts from 3 services, got {services}")
 print(f"[PASS] VMAlertmanager has {len(shop_alerts)} firing shop alerts across {services}")
 PY
 

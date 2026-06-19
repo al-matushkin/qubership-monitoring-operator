@@ -23,6 +23,7 @@ data:
         "mode": "normal",
         "charges_total": {"success": 0, "failure": 0},
         "up": 1,
+        "outage_started_at": None,
     }
     lock = threading.Lock()
 
@@ -51,6 +52,7 @@ data:
             if self.path == "/trigger-outage":
                 with lock:
                     state["mode"] = "outage"
+                    state["outage_started_at"] = time.time()
                     state["up"] = 0
                 log_event("ERROR", "payments_outage_started", "payments-api switched to outage mode", request_id=request_id)
                 self._write(200, "payments-api switched to outage mode\n")
@@ -58,6 +60,7 @@ data:
             if self.path == "/recover":
                 with lock:
                     state["mode"] = "normal"
+                    state["outage_started_at"] = None
                     state["up"] = 1
                 log_event("INFO", "payments_recovered", "payments-api recovered", request_id=request_id)
                 self._write(200, "payments-api recovered\n")

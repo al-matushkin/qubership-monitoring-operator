@@ -21,12 +21,15 @@ data:
     APPLICATION = "shop-checkout"
     TEAM = "payments"
     CHECKOUT_URL = "http://checkout-demo.shop.svc:8080/status"
+    POLL_INTERVAL_SECONDS = 3
+    DOWNSTREAM_GRACE_SECONDS = 12
 
     state = {
         "mode": "normal",
         "requests_total": {"success": 0, "error": 0},
         "p99_latency_seconds": 0.08,
         "up": 1,
+        "checkout_unhealthy_since": None,
     }
     lock = threading.Lock()
 
@@ -59,7 +62,7 @@ data:
                     "storefront serving outage symptoms",
                     request_id=request_id,
                 )
-                time.sleep(1)
+                time.sleep(POLL_INTERVAL_SECONDS)
                 continue
             started = time.time()
             try:
@@ -76,19 +79,37 @@ data:
                     state["up"] = 1
             except Exception as exc:
                 elapsed = time.time() - started
+                now = time.time()
                 with lock:
+                    if state["checkout_unhealthy_since"] is None:
+                        state["checkout_unhealthy_since"] = now
+                    unhealthy_for = now - state["checkout_unhealthy_since"]
                     state["requests_total"]["error"] += 1
                     state["p99_latency_seconds"] = max(state["p99_latency_seconds"], elapsed)
-                    state["up"] = 0
+                    if unhealthy_for >= DOWNSTREAM_GRACE_SECONDS:
+                        state["up"] = 0
+                        log_level = "ERROR"
+                        log_event_name = "checkout_status_failed"
+                        log_message = "storefront failed to reach checkout-demo"
+                    else:
+                        log_level = "WARN"
+                        log_event_name = "checkout_status_degraded"
+                        log_message = (
+                            "storefront sees checkout-demo unhealthy; grace period before marking down"
+                        )
                 log_event(
-                    "ERROR",
-                    "checkout_status_failed",
-                    "storefront failed to reach checkout-demo",
+                    log_level,
+                    log_event_name,
+                    log_message,
                     request_id=request_id,
                     downstream="checkout-demo",
                     error=str(exc),
+                    grace_remaining_seconds=max(0, int(DOWNSTREAM_GRACE_SECONDS - unhealthy_for)),
                 )
-            time.sleep(1)
+            else:
+                with lock:
+                    state["checkout_unhealthy_since"] = None
+            time.sleep(POLL_INTERVAL_SECONDS)
 
     class Handler(BaseHTTPRequestHandler):
         def _write(self, code, body, content_type="text/plain"):
@@ -115,6 +136,9 @@ data:
                 with lock:
                     state["mode"] = "normal"
                     state["up"] = 1
+                    state["checkout_unhealthy_since"] = None
+                    state["requests_total"] = {"success": 0, "error": 0}
+                    state["p99_latency_seconds"] = 0.08
                 log_event("INFO", "storefront_recovered", "storefront recovered", request_id=request_id)
                 self._write(200, "storefront recovered\n")
                 return
