@@ -411,4 +411,56 @@ else
   echo "Deploy with: kubectl apply -f k8s/mailpit.yaml"
 fi
 
+if kubectl get svc aurora-rca -n aurora >/dev/null 2>&1; then
+  echo "Installing Aurora RCA workflow (rule created — wait for cascade, then trigger)..."
+  # Retire topology / legacy Aurora and SMTP topology workflows.
+  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
+import json, sys, urllib.request
+api_url, api_key = sys.argv[1:3]
+auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
+headers = {"Authorization": auth}
+req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
+workflows = json.load(urllib.request.urlopen(req, timeout=20))
+legacy_ids = {
+    "shop-checkout-aurora-rca-trigger",
+    "shop-checkout-aurora-rca-topology-trigger",
+    "shop-checkout-aurora-rca-topology-sync",
+        "shop-checkout-aurora-rca-poll",
+        "shop-checkout-aurora-rca-rule-poll",
+    "shop-checkout-smtp-topology-notification",
+}
+legacy_names = {
+    "Shop checkout Aurora RCA trigger",
+    "Shop checkout Aurora RCA trigger (topology)",
+    "Shop checkout Aurora RCA topology sync",
+    "Shop checkout Aurora RCA sync",
+        "Shop checkout Aurora RCA poll",
+        "Shop checkout Aurora RCA trigger (rule)",
+    "Shop checkout SMTP notification (topology)",
+}
+to_delete = {
+    w["id"]
+    for w in workflows
+    if w.get("id") in legacy_ids or w.get("name") in legacy_names
+}
+for wid in to_delete:
+    del_req = urllib.request.Request(
+        f"{api_url.rstrip('/')}/workflows/{wid}",
+        headers=headers,
+        method="DELETE",
+    )
+    try:
+        urllib.request.urlopen(del_req, timeout=20)
+        print(f"retired workflow: {wid}")
+    except Exception as exc:
+        print(f"workflow {wid} not removed: {exc}")
+if not to_delete:
+    print("no legacy topology workflows to retire (ok)")
+PY
+  install_workflow "${ROOT_DIR}/keep/aurora-rca-rule-trigger-workflow.yaml" || echo "Aurora RCA workflow install skipped."
+else
+  echo "Aurora RCA stub not found in aurora namespace; skipping Aurora workflows."
+  echo "Deploy with: kubectl apply -f k8s/aurora-rca-stub.yaml"
+fi
+
 echo "Keep configuration applied."
