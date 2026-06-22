@@ -18,11 +18,11 @@ Keep integration:
 | Alerts | VMAlertmanager `keep-shadow` webhook |
 | Topology | Manual YAML import (`keep/topology.yaml`) + topology processor |
 | Ops metadata | CSV mapping on `labels.service` (`keep/shop-checkout-mapping.csv`) |
-| Log context | Graylog provider + alert workflow (`log_snippet`) + incident workflow (`log_summary`) |
+| Log context | Graylog per-alert (`log_snippet`) + incident rollup in integrated SMTP (`log_summary`) |
 | Rule incidents | App-level correlation rule (`keep/correlation-rules.json`) → `shopchk-*` |
 | Topology incidents | Topology processor groups alerts by application → `Application incident: shop-checkout` |
 | Notifications | Mailpit SMTP (optional) — **rule** incidents only; waits for enrichments, then one rich email |
-| RCA (optional) | [Aurora](https://arvo-ai-aurora.mintlify.app/) stub — rule `created` workflow waits for `alerts_count >= 2`, then trigger + poll |
+| RCA (optional) | [Aurora](https://arvo-ai-aurora.mintlify.app/) stub — inline in integrated SMTP workflow (≥1 linked alert) |
 
 Grafana and Jaeger are intentionally excluded.
 
@@ -117,7 +117,7 @@ KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
 
 **From the workload (production path):** put `environment` / `repository` on Deployment pod labels and join via Keep mapping on `labels.service` — no need to duplicate URLs on PrometheusRule labels.
 
-**Where the fields land:** mapping adds **top-level** alert properties, not entries under **Labels** in the UI. Check the **alert sidebar** (after `ALERT_SIDEBAR_FIELDS` in `values-keep-kind.yaml`) or the API:
+**Where the fields land:** mapping adds **top-level** alert properties, not entries under **Labels** in the UI. Check the **alert sidebar** (after `ALERT_SIDEBAR_FIELDS` in `values-keep-kind-postgres.yaml`) or the API:
 
 ```bash
 curl -u 'api_key:any-local-key' \
@@ -252,7 +252,7 @@ KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
 ```bash
 kubectl apply -f k8s/aurora-rca-stub.yaml
 kubectl -n aurora rollout status deploy/aurora-rca --timeout=120s
-KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh   # installs Aurora workflows when stub is up
+KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh   # re-apply; Aurora RCA runs inside integrated SMTP workflow
 ```
 
 After a rule incident (`shopchk-*`), verify: `./keep/test-aurora-rca.sh`. See [Aurora RCA integration](#aurora-rca-integration-optional).
@@ -330,12 +330,10 @@ kubectl -n shop rollout restart deploy/payments-api deploy/checkout-demo deploy/
 | `keep/correlation-rules.json` | Single app-level correlation rule |
 | `keep/shop-checkout-mapping.csv` | Service → runbook/owner/tier mapping |
 | `keep/graylog-enrichment-workflow.yaml` | Per-alert log enrichment (`enrich_alert`; Python formats `log_snippet`) |
-| `keep/graylog-incident-enrichment-workflow.yaml` | **Retired** — incident `log_summary` is in integrated SMTP workflow |
 | `k8s/mailpit.yaml` | Local SMTP catcher (port 1025) + web UI (8025) |
-| `keep/smtp-notification-workflow.yaml` | **Integrated** rule pipeline: ≥1 alert → Graylog → Aurora (optional) → SMTP |
+| `keep/smtp-notification-workflow.yaml` | Integrated rule pipeline: ≥1 alert → Graylog → Aurora (optional) → SMTP |
 | `keep/test-smtp-notification.sh` | Verify rule-incident SMTP delivery via Mailpit |
 | `k8s/aurora-rca-stub.yaml` | Minimal Aurora-compatible RCA API for Kind (optional) |
-| `keep/aurora-rca-rule-trigger-workflow.yaml` | **Retired** — Aurora RCA is in integrated SMTP workflow |
 | `keep/test-aurora-rca.sh` | Verify Aurora RCA enrichments on latest `shopchk-*` incident |
 | `keep/resolve-stale-incidents.sh` | Bulk-resolve firing incidents (cleanup helper) |
 | `keep/apply-keep-config.sh` | Apply topology, rules, mapping, providers, workflows |
@@ -356,7 +354,7 @@ wait until alerts_count ≥ 1 (up to 90s)
   → build + send one HTML email
 ```
 
-No minimum cascade size — one firing shop alert is enough. Email latency is ~20–90s (Aurora stub ~20s investigation). Topology incidents do not send email.
+No minimum cascade size — one firing shop alert is enough. Typical email latency is ~30–60s; worst case ~180s (90s alert wait + 90s Aurora poll). Topology incidents do not send email.
 
 Verify: `./keep/test-smtp-notification.sh` (Mailpit UI: port-forward `8025` → `http://127.0.0.1:18025/`).
 
@@ -376,7 +374,7 @@ Topology: no workflows — UI graph only
 |-------|-----------|
 | Stub manifest | `k8s/aurora-rca-stub.yaml` — service `aurora-rca.aurora.svc:5080` |
 | RCA + email | `keep/smtp-notification-workflow.yaml` — Aurora POST + poll, then email includes RCA section |
-| Install | `apply-keep-config.sh` retires separate Aurora/Graylog incident workflows |
+| Install | `apply-keep-config.sh` installs integrated SMTP; removes legacy workflows from earlier PoC revisions |
 | Verify | `./keep/test-smtp-notification.sh` or `./keep/test-aurora-rca.sh` (incident enrichments) |
 
 **Deploy stub + workflows:**
@@ -398,7 +396,7 @@ KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
 
 **Keep UI — “External incident”:** Keep has a built-in sidebar block for linking to an external ticket/RCA system. It reads enrichments `incident_id`, `incident_url`, and `incident_provider` (see [Keep incident enrich example](https://github.com/keephq/keep/blob/main/examples/workflows/incident-enrich.yaml)). The PoC currently sets custom `aurora_*` fields only; a production wiring should also set `incident_id` + `incident_url` (Aurora **UI** URL) + `incident_provider: aurora` so the link is clickable. Do not point `incident_url` at the in-cluster API hostname.
 
-**Enrichment merge (important):** Aurora workflows use the **`mock` provider + `enrich_incident`** (same pattern as Graylog incident enrichment). Do **not** use HTTP `POST /incidents/{id}/enrich` with `force: true` for partial updates — that **replaces** the whole enrichment dict and wipes `log_summary` / `graylog_query`. Poll reads `aurora_rca_status` via HTTP `GET http://keep-backend:8080/incidents/{id}` (`steps.fetch-keep-incident.results.body.*`) because `incident.enrichments.*` in workflow `if` conditions is unreliable in Keep 0.52.x.
+**Enrichment merge (important):** the integrated SMTP workflow uses the **`mock` provider + `enrich_incident`** for `log_summary` and Aurora fields. Do **not** use HTTP `POST /incidents/{id}/enrich` with `force: true` for partial updates — that **replaces** the whole enrichment dict and wipes other keys. Aurora poll status is read inline in Python (`GET /incidents/{id}`) because `incident.enrichments.*` in workflow `if` conditions is unreliable in Keep 0.52.x.
 
 **Stub vs real Aurora:**
 
@@ -451,7 +449,7 @@ Switching between SQLite and Postgres starts a **fresh** database; re-run `apply
 | Incidents stuck after recover (`CheckoutDemoHighErrorRatio`) | Alert uses `rate(checkout_requests_total[5m])`, not lifetime `/status` `error_ratio`; wait ~5–6m or `kubectl -n shop rollout restart deploy/checkout-demo` to speed up |
 | Incidents/alerts need manual refresh; no WebSocket in DevTools | PoC `frontend.env` / `backend.env` must include chart defaults (`PUSHER_APP_KEY`, `PUSHER_HOST=keep-websocket`, …). Re-run `./deploy-keep-ingress-kind.sh`. DevTools: **Socket** filter (not text search `ws`). Menu badge may update via HTTP polling while the list stays stale without push |
 | Aurora trigger workflow failed (`keep.join` in HTTP body) | `keep.join()` works in SMTP/HTML templates only, not HTTP JSON `body` fields. Re-run `apply-keep-config.sh` (revision ≥ 3 uses `service: shop-checkout`) |
-| `log_summary` missing after Aurora RCA | HTTP enrich with `force: true` wipes other enrichments. PoC workflows use `mock` + `enrich_incident` (merge). Re-install workflows; Graylog refresh on next `incident:updated` restores logs |
+| `log_summary` missing after Aurora RCA | HTTP enrich with `force: true` wipes other enrichments. PoC uses `mock` + `enrich_incident` (merge). Re-run `apply-keep-config.sh` to reinstall the integrated workflow |
 | `aurora_url` does not open in browser | PoC URL is in-cluster API (`aurora-rca.aurora.svc`), not Aurora UI. Use port-forward + curl, or set `incident_url` to a public Aurora UI URL for the External incident block |
 
 ## Teardown

@@ -61,7 +61,7 @@ vmalert (PrometheusRules)
 
 - **Explicit** — provider + workflow, not automatic
 - **Alerts:** Graylog → `log_snippet` (per-alert workflow)
-- **Incidents:** `log_summary` on rule `created` — wait until `alerts_count ≥ 2`
+- **Incidents:** `log_summary` in integrated SMTP workflow on rule `created` — waits until `alerts_count ≥ 1`
 - Join keys: `service`, `namespace`, `pod`
 
 **Solves:** log evidence on the incident — faster triage
@@ -93,7 +93,7 @@ vmalert (PrometheusRules)
 | | Rule incident (`shopchk-*`) | Topology incident |
 |---|---------------------------|-------------------|
 | Source | `correlation-rules.json` | Topology processor |
-| Workflows | SMTP, Graylog rollup, Aurora (optional) | Graph + linked alerts (no workflows in PoC) |
+| Workflows | Integrated SMTP (Graylog + optional Aurora) | Graph + linked alerts (no workflows in PoC) |
 | Trigger | `incident:created` | Processor ticks (~10s) |
 
 **Recommendation:** run notifications and enrichment on **rule** incidents; use topology for the dependency graph.
@@ -177,7 +177,7 @@ vmalert (PrometheusRules)
 
 **Practical RCA:** topology → alert names → logs → `startsAt`
 
-**Optional:** Aurora stub — wait ≥2 alerts → enrich `rca_summary` / `root_cause`
+**Optional:** Aurora stub — inline in integrated SMTP (≥1 alert) → enrich `rca_summary` / `root_cause`
 
 **Solves:** one triage pane — RCA human unless external engine added
 
@@ -186,8 +186,8 @@ vmalert (PrometheusRules)
 ## Aurora RCA — enrich-back (optional)
 
 ```
-shopchk-* created → wait (alerts_count ≥ 2)
-                 → Graylog + Aurora poll → enrich incident
+shopchk-* created → wait (alerts_count ≥ 1)
+                 → Graylog → Aurora poll → enrich → SMTP
 ```
 
 - Kind **stub** only — not production Aurora
@@ -205,7 +205,7 @@ shopchk-* created → wait (alerts_count ≥ 2)
 ## Notifications — findings
 
 - Workflows + providers (SMTP, Jira, Webex, …); templates use `{{ incident.* }}`, `{{ steps.* }}`
-- **PoC (SMTP):** **rule incidents** (`shopchk-*` on `created`) — 1 email per incident, not per alert
+- **PoC (SMTP):** **rule incidents** (`shopchk-*` on `created`) — one enriched email per incident (logs, ops context, optional RCA)
 - Topology incident: visualization only — same notification pattern as other enrichments (rule-first)
 - Emails include Keep incident link, services, severity
 
@@ -291,14 +291,14 @@ create Jira → enrich ticket_url → notify (Webex/SMTP)
 ## Recommended phasing (1/2)
 
 1. **Now:** `keep-shadow` + correlation rules + mapping CSV
-2. **Next:** Graylog + SMTP on rule `created` (wait-for-cascade)
+2. **Next:** integrated SMTP on rule `created` (≥1 linked alert → Graylog → optional Aurora → email)
 3. **Later:** Topology provider or YAML; platform K8s rules
 
 ---
 
 ## Recommended phasing (2/2)
 
-4. **Optional:** External RCA (Aurora) enrich-back on rule incidents
+4. **Optional:** External RCA (Aurora) enrich-back — already wired in integrated SMTP workflow for rule incidents
 5. **Per app:** Manual topology for 1–2 pilots
 
 **Labels:** `service`, `namespace`, `application` + **`/prometheus` webhook**

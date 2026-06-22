@@ -4,9 +4,9 @@ set -euo pipefail
 
 KEEP_API_URL="${KEEP_API_URL:-http://keep.local:30080/v2}"
 KEEP_API_KEY="${KEEP_API_KEY:-any-local-key}"
-WAIT_SECS="${WAIT_SECS:-90}"
+WAIT_SECS="${WAIT_SECS:-180}"
 
-echo "Waiting ${WAIT_SECS}s for cascade + Aurora workflow (created, waits for alerts_count >= 2)..."
+echo "Waiting ${WAIT_SECS}s for integrated SMTP workflow (Graylog + optional Aurora; needs ≥1 linked alert)..."
 sleep "${WAIT_SECS}"
 
 incident="$(curl -fsSu "api_key:${KEEP_API_KEY}" \

@@ -54,5 +54,5 @@ These are installed separately on Kind; the example documents versions and value
 | Directory | Files |
 |-----------|--------|
 | `k8s/` | shop app (3 services), ServiceMonitors, PrometheusRules, Mailpit, VMAlertmanager keep-shadow |
-| `keep/` | topology, correlation rules, mapping CSV, Graylog/SMTP workflows, optional Aurora RCA, `apply-keep-config.sh` |
+| `keep/` | topology, correlation rules, mapping CSV, Graylog alert + integrated SMTP workflows, optional Aurora stub, `apply-keep-config.sh` |
 | root | Kind Helm overlays, `shop-control.sh`, deploy/validate/port-forward scripts, README |

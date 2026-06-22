@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEP_API_URL="${KEEP_API_URL:-http://keep.local:30080/v2}"
 KEEP_API_KEY="${KEEP_API_KEY:-any-local-key}"
 MAILPIT_API_URL="${MAILPIT_API_URL:-http://127.0.0.1:18025/api/v1}"
-WAIT_SECS="${WAIT_SECS:-150}"
+WAIT_SECS="${WAIT_SECS:-180}"
 
 before_count() {
   curl -fsS "${MAILPIT_API_URL}/messages" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('total',0))" || echo 0
