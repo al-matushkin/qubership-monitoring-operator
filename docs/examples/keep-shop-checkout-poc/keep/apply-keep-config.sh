@@ -362,23 +362,29 @@ if kubectl get svc graylog-service -n logging >/dev/null 2>&1; then
   install_graylog_provider || echo "Graylog provider install skipped (already installed or auth failed)."
   echo "Installing Graylog alert enrichment workflow..."
   install_workflow "${ROOT_DIR}/keep/graylog-enrichment-workflow.yaml" || echo "Graylog alert workflow install skipped."
-  echo "Installing Graylog incident enrichment workflow..."
-  install_workflow "${ROOT_DIR}/keep/graylog-incident-enrichment-workflow.yaml" || echo "Graylog incident workflow install skipped."
   python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
 import json, sys, urllib.request
 api_url, api_key = sys.argv[1:3]
 auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
 headers = {"Authorization": auth}
 req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
+retire_ids = {
+    "shop-checkout-graylog-incident-enrichment",
+}
+retire_names = {
+    "Shop checkout Graylog incident enrichment (rule)",
+    "Shop checkout Graylog incident enrichment",
+}
 for w in json.load(urllib.request.urlopen(req, timeout=20)):
-    if w.get("name") == "Shop checkout Graylog incident enrichment":
-        del_req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE")
+    if w.get("id") in retire_ids or w.get("name") in retire_names:
+        del_req = urllib.request.Request(
+            f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE"
+        )
         try:
             urllib.request.urlopen(del_req, timeout=20)
-            print(f"retired workflow: {w['id']}")
+            print(f"retired workflow: {w['id']} (incident logs now in integrated SMTP workflow)")
         except Exception as exc:
             print(f"workflow {w['id']} not removed: {exc}")
-        break
 PY
 else
   echo "Graylog service not found in logging namespace; skipping provider/workflow install."
@@ -404,7 +410,7 @@ for w in json.load(urllib.request.urlopen(req, timeout=20)):
             print(f"workflow {w['id']} not removed: {exc}")
         break
 PY
-  echo "Installing SMTP notification workflow (rule incidents only)..."
+  echo "Installing integrated SMTP workflow (Graylog + Aurora + email)..."
   install_workflow "${ROOT_DIR}/keep/smtp-notification-workflow.yaml" || echo "SMTP rule workflow install skipped."
 else
   echo "Mailpit service not found in keep namespace; skipping SMTP notification PoC."
@@ -412,8 +418,8 @@ else
 fi
 
 if kubectl get svc aurora-rca -n aurora >/dev/null 2>&1; then
-  echo "Installing Aurora RCA workflow (rule created — wait for cascade, then trigger)..."
-  # Retire topology / legacy Aurora and SMTP topology workflows.
+  echo "Aurora stub detected — RCA runs inside integrated SMTP workflow (no separate workflow)."
+  # Retire topology / legacy Aurora and separate rule Aurora workflows.
   python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
 import json, sys, urllib.request
 api_url, api_key = sys.argv[1:3]
@@ -427,6 +433,7 @@ legacy_ids = {
     "shop-checkout-aurora-rca-topology-sync",
         "shop-checkout-aurora-rca-poll",
         "shop-checkout-aurora-rca-rule-poll",
+    "shop-checkout-aurora-rca-rule-trigger",
     "shop-checkout-smtp-topology-notification",
 }
 legacy_names = {
@@ -436,6 +443,7 @@ legacy_names = {
     "Shop checkout Aurora RCA sync",
         "Shop checkout Aurora RCA poll",
         "Shop checkout Aurora RCA trigger (rule)",
+    "Shop checkout Aurora RCA (rule)",
     "Shop checkout SMTP notification (topology)",
 }
 to_delete = {
@@ -455,12 +463,26 @@ for wid in to_delete:
     except Exception as exc:
         print(f"workflow {wid} not removed: {exc}")
 if not to_delete:
-    print("no legacy topology workflows to retire (ok)")
+    print("no legacy Aurora workflows to retire (ok)")
 PY
-  install_workflow "${ROOT_DIR}/keep/aurora-rca-rule-trigger-workflow.yaml" || echo "Aurora RCA workflow install skipped."
 else
-  echo "Aurora RCA stub not found in aurora namespace; skipping Aurora workflows."
-  echo "Deploy with: kubectl apply -f k8s/aurora-rca-stub.yaml"
+  echo "Aurora RCA stub not found — integrated SMTP workflow skips Aurora (Graylog + email only)."
+  echo "Deploy stub with: kubectl apply -f k8s/aurora-rca-stub.yaml"
+  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
+import json, sys, urllib.request
+api_url, api_key = sys.argv[1:3]
+auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
+headers = {"Authorization": auth}
+req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
+for w in json.load(urllib.request.urlopen(req, timeout=20)):
+    if w.get("id") == "shop-checkout-aurora-rca-rule-trigger" or w.get("name") == "Shop checkout Aurora RCA (rule)":
+        del_req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE")
+        try:
+            urllib.request.urlopen(del_req, timeout=20)
+            print(f"retired workflow: {w['id']}")
+        except Exception as exc:
+            print(f"workflow {w['id']} not removed: {exc}")
+PY
 fi
 
 echo "Keep configuration applied."

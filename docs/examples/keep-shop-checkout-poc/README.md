@@ -21,7 +21,7 @@ Keep integration:
 | Log context | Graylog provider + alert workflow (`log_snippet`) + incident workflow (`log_summary`) |
 | Rule incidents | App-level correlation rule (`keep/correlation-rules.json`) → `shopchk-*` |
 | Topology incidents | Topology processor groups alerts by application → `Application incident: shop-checkout` |
-| Notifications | Mailpit SMTP (optional) — **rule** incidents only (`shopchk-*` on `created`) |
+| Notifications | Mailpit SMTP (optional) — **rule** incidents only; waits for enrichments, then one rich email |
 | RCA (optional) | [Aurora](https://arvo-ai-aurora.mintlify.app/) stub — rule `created` workflow waits for `alerts_count >= 2`, then trigger + poll |
 
 Grafana and Jaeger are intentionally excluded.
@@ -136,7 +136,7 @@ curl -u 'api_key:any-local-key' \
 
 **Extraction rules are not required** for this PoC. VMAlert/Alertmanager delivers structured labels and `description`; mapping and Graylog workflows add ops/log fields. Extend **`ALERT_SIDEBAR_FIELDS`** in `values-keep-kind-postgres.yaml` (e.g. `log_snippet`, `symptom`, `pod`) rather than adding regex extraction. See checklist item 5 in [`follow-up-checklist.md`](../../keep/follow-up-checklist.md).
 
-**Incident log rollup:** `graylog-incident-enrichment-workflow.yaml` runs on **rule** `incident:created`, waits until `alerts_count >= 2`, then sets `log_summary` + `graylog_query`. Per-alert `log_snippet` still comes from `graylog-enrichment-workflow.yaml` (`type: alert`).
+**Incident log rollup:** integrated into `smtp-notification-workflow.yaml` (Graylog fetch → enrich → optional Aurora → email). Per-alert `log_snippet` still comes from `graylog-enrichment-workflow.yaml` (`type: alert`).
 
 ### Keep persistence + ingress (Kind)
 
@@ -330,12 +330,12 @@ kubectl -n shop rollout restart deploy/payments-api deploy/checkout-demo deploy/
 | `keep/correlation-rules.json` | Single app-level correlation rule |
 | `keep/shop-checkout-mapping.csv` | Service → runbook/owner/tier mapping |
 | `keep/graylog-enrichment-workflow.yaml` | Per-alert log enrichment (`enrich_alert`; Python formats `log_snippet`) |
-| `keep/graylog-incident-enrichment-workflow.yaml` | Rule `incident:created` — wait for ≥2 alerts, then `log_summary` rollup |
+| `keep/graylog-incident-enrichment-workflow.yaml` | **Retired** — incident `log_summary` is in integrated SMTP workflow |
 | `k8s/mailpit.yaml` | Local SMTP catcher (port 1025) + web UI (8025) |
-| `keep/smtp-notification-workflow.yaml` | SMTP on `shopchk-*` rule incident `created` |
+| `keep/smtp-notification-workflow.yaml` | **Integrated** rule pipeline: ≥1 alert → Graylog → Aurora (optional) → SMTP |
 | `keep/test-smtp-notification.sh` | Verify rule-incident SMTP delivery via Mailpit |
 | `k8s/aurora-rca-stub.yaml` | Minimal Aurora-compatible RCA API for Kind (optional) |
-| `keep/aurora-rca-rule-trigger-workflow.yaml` | Rule `incident:created` — wait for cascade (≥2 alerts), POST Aurora, poll, enrich RCA |
+| `keep/aurora-rca-rule-trigger-workflow.yaml` | **Retired** — Aurora RCA is in integrated SMTP workflow |
 | `keep/test-aurora-rca.sh` | Verify Aurora RCA enrichments on latest `shopchk-*` incident |
 | `keep/resolve-stale-incidents.sh` | Bulk-resolve firing incidents (cleanup helper) |
 | `keep/apply-keep-config.sh` | Apply topology, rules, mapping, providers, workflows |
@@ -346,7 +346,17 @@ kubectl -n shop rollout restart deploy/payments-api deploy/checkout-demo deploy/
 
 Optional: deploy Mailpit first (`kubectl apply -f k8s/mailpit.yaml`), then re-run `apply-keep-config.sh`.
 
-One workflow — email on **`shopchk-*` rule incident `created`** (`smtp-notification-workflow.yaml`). Topology incidents do not send email.
+One **integrated** workflow on **`shopchk-*` rule `incident:created`** (`smtp-notification-workflow.yaml`):
+
+```text
+wait until alerts_count ≥ 1 (up to 90s)
+  → Graylog log_summary
+  → Aurora trigger + poll (up to 90s; skipped if stub unreachable)
+  → enrich incident (mock)
+  → build + send one HTML email
+```
+
+No minimum cascade size — one firing shop alert is enough. Email latency is ~20–90s (Aurora stub ~20s investigation). Topology incidents do not send email.
 
 Verify: `./keep/test-smtp-notification.sh` (Mailpit UI: port-forward `8025` → `http://127.0.0.1:18025/`).
 
@@ -354,21 +364,20 @@ Verify: `./keep/test-smtp-notification.sh` (Mailpit UI: port-forward `8025` → 
 
 Keep OSS correlates symptoms and assembles context (topology, logs, alerts) but does **not** run automated root-cause analysis. A logical next step if Keep is adopted is to **trigger an external RCA tool** on incident create and **enrich results back** onto the Keep incident.
 
-This PoC wires **[Arvo AI Aurora](https://arvo-ai-aurora.mintlify.app/)** using **one** Keep workflow and a **lightweight API stub** for Kind.
+This PoC wires **[Arvo AI Aurora](https://arvo-ai-aurora.mintlify.app/)** inside the integrated SMTP workflow (not a separate workflow).
 
 ```text
 Rule (shopchk-*): incident created
-  → SMTP immediately
-  → Graylog + Aurora wait (poll up to 90s) until alerts_count ≥ 2, then enrich
+  → integrated workflow: Graylog → Aurora → enrich → SMTP
 Topology: no workflows — UI graph only
 ```
 
 | Piece | PoC value |
 |-------|-----------|
 | Stub manifest | `k8s/aurora-rca-stub.yaml` — service `aurora-rca.aurora.svc:5080` |
-| Rule workflow | `keep/aurora-rca-rule-trigger-workflow.yaml` — **`incident:created`**, inline wait until `alerts_count >= 2`, then Aurora POST + poll |
-| Install | `apply-keep-config.sh` when `aurora-rca` service exists |
-| Verify | `./keep/test-aurora-rca.sh` |
+| RCA + email | `keep/smtp-notification-workflow.yaml` — Aurora POST + poll, then email includes RCA section |
+| Install | `apply-keep-config.sh` retires separate Aurora/Graylog incident workflows |
+| Verify | `./keep/test-smtp-notification.sh` or `./keep/test-aurora-rca.sh` (incident enrichments) |
 
 **Deploy stub + workflows:**
 
@@ -400,7 +409,7 @@ KEEP_API_URL=http://keep.local:30080/v2 ./keep/apply-keep-config.sh
 | Docs | This README | [Mintlify docs](https://arvo-ai-aurora.mintlify.app/), [GitHub Pages](https://arvo-ai.github.io/aurora) |
 | Workflow `aurora_api_base` | `http://aurora-rca.aurora.svc:5080` | Your Aurora API base URL |
 
-**Anti-spam:** Aurora and Graylog incident rollup use **`incident:created` only** (not `updated`) so topology processor ticks (~10s) never dispatch them. Both poll the incident API until `alerts_count >= 2` before enriching. SMTP stays on rule `created` (immediate).
+**Anti-spam:** integrated SMTP uses **`incident:created` only** (not `updated`). One email per incident (`notification_sent` guard). Requires **≥1 linked alert** before enrich/send.
 
 See checklist item 6 in [`follow-up-checklist.md`](../../keep/follow-up-checklist.md) for how Aurora fits the broader “Keep + RCA sidecar” evaluation.
 

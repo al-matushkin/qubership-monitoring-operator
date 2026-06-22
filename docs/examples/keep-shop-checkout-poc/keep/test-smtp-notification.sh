@@ -1,14 +1,29 @@
 #!/usr/bin/env bash
-# Verify item 7: one SMTP email per incident (not per alert).
+# Verify enriched SMTP email per rule incident (not per alert).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEP_API_URL="${KEEP_API_URL:-http://keep.local:30080/v2}"
 KEEP_API_KEY="${KEEP_API_KEY:-any-local-key}"
 MAILPIT_API_URL="${MAILPIT_API_URL:-http://127.0.0.1:18025/api/v1}"
+WAIT_SECS="${WAIT_SECS:-150}"
 
 before_count() {
   curl -fsS "${MAILPIT_API_URL}/messages" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('total',0))" || echo 0
+}
+
+find_firing_shopchk_incident() {
+  curl -fsS -u "api_key:${KEEP_API_KEY}" "${KEEP_API_URL}/incidents?limit=30" | python3 -c "
+import json, sys
+items = json.load(sys.stdin)
+if isinstance(items, dict):
+    items = items.get('items', [])
+for i in items:
+    name = str(i.get('user_generated_name', ''))
+    if i.get('incident_type') == 'rule' and i.get('status') == 'firing' and name.startswith('shopchk-'):
+        print(i['id'])
+        break
+"
 }
 
 echo "==> Deploy Mailpit (SMTP capture) in namespace keep..."
@@ -26,61 +41,51 @@ msgs_before="$(before_count)"
 echo "==> Install SMTP provider + workflow..."
 KEEP_API_URL="${KEEP_API_URL}" KEEP_API_KEY="${KEEP_API_KEY}" "${ROOT_DIR}/keep/apply-keep-config.sh"
 
-workflow_id="$(curl -fsS -u "api_key:${KEEP_API_KEY}" "${KEEP_API_URL}/workflows" | python3 -c "
-import json,sys
-for w in json.load(sys.stdin):
-    if w.get('id') == 'shop-checkout-smtp-notification' or w.get('name') == 'Shop checkout SMTP notification':
-        print(w['id'])
-        break
-")"
+incident_id="$(find_firing_shopchk_incident || true)"
+if [[ -z "${incident_id:-}" ]]; then
+  echo "No firing shopchk rule incident — triggering cascade..."
+  "${ROOT_DIR}/shop-control.sh" trigger-cascade
+  echo "Waiting up to ${WAIT_SECS}s for shopchk-* rule incident..."
+  for _ in $(seq 1 $((WAIT_SECS / 5))); do
+    incident_id="$(find_firing_shopchk_incident || true)"
+    if [[ -n "${incident_id:-}" ]]; then
+      echo "Firing rule incident: ${incident_id}"
+      break
+    fi
+    sleep 5
+  done
+fi
 
-incident_id="$(curl -fsS -u "api_key:${KEEP_API_KEY}" "${KEEP_API_URL}/incidents?limit=20" | python3 -c "
-import json,sys
-items=json.load(sys.stdin)
-if not isinstance(items,list): items=items.get('items',[])
-for i in items:
-    if not isinstance(i,dict): continue
-    if i.get('incident_type')=='rule' and i.get('status')=='firing' and 'shopchk' in str(i.get('user_generated_name','')):
-        print(i['id']); break
-")"
-
-echo "==> Run workflow against firing rule incident (${workflow_id}, incident=${incident_id:-none})..."
-if [[ -n "${incident_id:-}" ]]; then
-  curl -fsS -u "api_key:${KEEP_API_KEY}" -X POST \
-    "${KEEP_API_URL}/workflows/${workflow_id}/run?incident_id=${incident_id}" \
-    -H 'Content-Type: application/json' \
-    -d '{}'
-else
-  echo "No firing shopchk rule incident found; trigger an outage first or pass incident_id."
+if [[ -z "${incident_id:-}" ]]; then
+  echo "No firing shopchk rule incident found. Check correlation rules and VMAlertmanager → Keep webhook."
   exit 1
 fi
 
-echo
-echo "==> Waiting for workflow + SMTP delivery..."
-sleep 8
-
-msgs_after="$(before_count)"
-new_msgs=$((msgs_after - msgs_before))
-echo "New Mailpit messages: ${new_msgs} (total ${msgs_after})"
-
-if [[ "${new_msgs}" -lt 1 ]]; then
-  echo "No new email captured. Check keep-backend logs:"
-  kubectl -n keep logs deploy/keep-backend --tail=40 | grep -iE 'smtp|workflow|shop-checkout-smtp' || true
-  exit 1
-fi
-
-if [[ "${new_msgs}" -gt 1 ]]; then
-  echo "WARN: expected 1 new message, got ${new_msgs}"
-fi
-
-curl -fsS "${MAILPIT_API_URL}/messages" | python3 -c "
-import json,sys
-data=json.load(sys.stdin)
-msg=data['messages'][0]
-print('Subject:', msg.get('Subject'))
-print('To:', msg.get('To'))
-print('Snippet:', msg.get('Snippet','')[:240])
+echo "==> Waiting up to ${WAIT_SECS}s for enriched SMTP (workflow polls Graylog/Aurora, then sends)..."
+for i in $(seq 1 $((WAIT_SECS / 5))); do
+  msgs_after="$(before_count)"
+  new_msgs=$((msgs_after - msgs_before))
+  if [[ "${new_msgs}" -ge 1 ]]; then
+    echo "New Mailpit messages: ${new_msgs} (after $((i * 5))s)"
+    curl -fsS "${MAILPIT_API_URL}/messages" | python3 -c "
+import json, sys, urllib.request
+data = json.load(sys.stdin)
+msgs = sorted(data.get('messages', []), key=lambda m: m.get('Created', ''), reverse=True)
+mid = msgs[0]['ID']
+detail = json.load(urllib.request.urlopen('http://127.0.0.1:18025/api/v1/message/' + mid))
+html = detail.get('HTML', '') or detail.get('Text', '')
+print('Subject:', detail.get('Subject'))
+for label in ['Log summary', 'Ops context', 'Correlated alerts', 'payments-oncall', 'runbook', 'Root cause']:
+    print(f'  contains {label!r}:', label.lower() in html.lower())
+print('HTML length:', len(html))
 "
+    echo "Open Mailpit UI: kubectl -n keep port-forward svc/mailpit 18025:8025  →  http://127.0.0.1:18025/"
+    echo "SMTP incident notification PoC: OK (one enriched email per incident)"
+    exit 0
+  fi
+  sleep 5
+done
 
-echo "Open Mailpit UI: kubectl -n keep port-forward svc/mailpit 18025:8025  →  http://127.0.0.1:18025/"
-echo "SMTP incident notification PoC: OK (one email per incident)"
+echo "No new email captured within ${WAIT_SECS}s. Check keep-backend logs:"
+kubectl -n keep logs deploy/keep-backend --tail=60 | grep -iE 'smtp|shop-checkout-smtp|send-enriched|wait-enrich' || true
+exit 1

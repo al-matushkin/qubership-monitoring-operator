@@ -1,17 +1,339 @@
 workflow:
   id: shop-checkout-smtp-notification
   name: Shop checkout SMTP notification (rule)
-  description: One email per shopchk-* rule incident on created (not per alert update).
+  description: >
+    Integrated rule-incident pipeline: wait for at least one linked alert, enrich
+    with Graylog logs and optional Aurora RCA, then send one SMTP email.
   consts:
-    keep_ui_base: "http://keep.local:30080"
+    keep_api_base: "http://keep-backend:8080"
+    keep_api_auth: "Basic YXBpX2tleTphbnktbG9jYWwta2V5"
+    aurora_api_base: "http://aurora-rca.aurora.svc:5080"
+    min_alerts: "1"
+    wait_poll_seconds: "5"
+    wait_max_seconds: "90"
+    aurora_poll_seconds: "5"
+    aurora_poll_max_seconds: "90"
   triggers:
     - type: manual
     - type: incident
       events:
         - created
+  steps:
+    - name: guard-and-wait-for-alert
+      if: "'{{ incident.incident_type }}' == 'rule'"
+      provider:
+        type: python
+        config: "{{ providers.default-python }}"
+        with:
+          imports: "json,time,urllib.request"
+          code: |
+            exec("""
+            KEEP = 'http://keep-backend:8080'
+            AUTH = 'Basic YXBpX2tleTphbnktbG9jYWwta2V5'
+            incident_id = '{{ incident.id }}'
+            min_alerts = int('{{ consts.min_alerts }}')
+            poll_s = int('{{ consts.wait_poll_seconds }}')
+            max_wait = int('{{ consts.wait_max_seconds }}')
+            def _get():
+                req = Request(f'{KEEP}/incidents/{incident_id}', headers={'Authorization': AUTH})
+                with urlopen(req, timeout=15) as resp:
+                    return json.loads(resp.read().decode())
+            body = _get()
+            enrich = body.get('enrichments') or {}
+            if str(enrich.get('notification_sent', '')).lower() == 'true':
+                RESULT = {'skip': 'true', 'ready': 'false', 'reason': 'already_sent', 'alerts_count': '0'}
+            else:
+                elapsed = 0
+                ready = False
+                reason = 'timeout'
+                while elapsed <= max_wait:
+                    body = _get()
+                    count = int(body.get('alerts_count') or 0)
+                    if count >= min_alerts:
+                        ready = True
+                        reason = 'alert_linked'
+                        break
+                    time.sleep(poll_s)
+                    elapsed += poll_s
+                RESULT = {
+                    'skip': 'false',
+                    'ready': 'true' if ready else 'false',
+                    'reason': reason,
+                    'alerts_count': str(int(body.get('alerts_count') or 0)),
+                }
+            """) or RESULT
+    - name: fetch-incident-logs
+      if: "'{{ incident.incident_type }}' == 'rule' and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
+      provider:
+        type: graylog
+        config: "{{ providers.graylog-shop }}"
+        with:
+          events_search_parameters:
+            query: 'application:"shop-checkout" AND namespace:"shop"'
+            query_type: elastic
+            timerange_seconds: 600
+            timerange_type: relative
+            page: 0
+            per_page: 10
+    - name: format-log-summary
+      if: "'{{ incident.incident_type }}' == 'rule' and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
+      provider:
+        type: python
+        config: "{{ providers.default-python }}"
+        with:
+          code: "(lambda logs: 'Shop-checkout incident logs (last 10m, newest first):' + chr(10) + chr(10).join([f\"- {i}. {(m:=e.get('message',e)).get('timestamp', m.get('time',''))} | {m.get('service', m.get('labels_service',''))} | {m.get('source_level','')} | {m.get('event','')} | pod={m.get('pod','')}\" for i,e in enumerate(logs[:10], 1)]))({{ steps.fetch-incident-logs.results }})"
+    - name: aurora-rca-inline
+      if: "'{{ incident.incident_type }}' == 'rule' and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
+      provider:
+        type: python
+        config: "{{ providers.default-python }}"
+        with:
+          imports: "json,time,urllib.request"
+          code: |
+            exec("""
+            AURORA = 'http://aurora-rca.aurora.svc:5080'
+            title = '{{ incident.user_generated_name }}'
+            keep_id = '{{ incident.id }}'
+            poll_s = int('{{ consts.aurora_poll_seconds }}')
+            max_wait = int('{{ consts.aurora_poll_max_seconds }}')
+            def _post():
+                payload = json.dumps({
+                    'alert_title': title,
+                    'severity': 'high',
+                    'service': 'shop-checkout',
+                    'source_type': 'custom',
+                    'environment': 'shop',
+                    'metadata': {
+                        'keep_incident_id': keep_id,
+                        'keep_incident_type': 'rule',
+                    },
+                }).encode('utf-8')
+                req = Request(
+                    f'{AURORA}/api/incidents/create',
+                    data=payload,
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with urlopen(req, timeout=15) as resp:
+                    return json.loads(resp.read().decode())
+            def _get(aid):
+                req = Request(f'{AURORA}/api/incidents/{aid}')
+                with urlopen(req, timeout=15) as resp:
+                    return json.loads(resp.read().decode())
+            try:
+                created = _post()
+                aurora_id = created.get('id', '')
+                body = {}
+                elapsed = 0
+                while elapsed <= max_wait:
+                    body = _get(aurora_id)
+                    if body.get('auroraStatus') == 'complete':
+                        break
+                    time.sleep(poll_s)
+                    elapsed += poll_s
+                RESULT = {
+                    'enabled': 'true',
+                    'aurora_id': aurora_id,
+                    'aurora_status': body.get('auroraStatus', ''),
+                    'summary': body.get('summary', ''),
+                    'root_cause': body.get('rootCause', ''),
+                }
+            except Exception as exc:
+                RESULT = {
+                    'enabled': 'false',
+                    'aurora_id': '',
+                    'aurora_status': '',
+                    'summary': '',
+                    'root_cause': '',
+                    'error': str(exc)[:200],
+                }
+            """) or RESULT
+    - name: build-email-sections
+      if: "'{{ incident.incident_type }}' == 'rule' and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
+      provider:
+        type: python
+        config: "{{ providers.default-python }}"
+        with:
+          imports: "html,json,urllib.request"
+          code: |
+            exec("""
+            KEEP = 'http://keep-backend:8080'
+            AUTH = 'Basic YXBpX2tleTphbnktbG9jYWwta2V5'
+            UI = 'http://' + 'keep' + '.' + 'local' + ':30080'
+            incident_id = '{{ incident.id }}'
+            graylog_query = 'application:"shop-checkout" AND namespace:"shop"'
+            aurora_enabled = '{{ steps.aurora-rca-inline.results.enabled }}'
+            aurora_id = '{{ steps.aurora-rca-inline.results.aurora_id }}'
+            aurora_status = '{{ steps.aurora-rca-inline.results.aurora_status }}'
+            rca_summary = '{{ steps.aurora-rca-inline.results.summary }}'
+            root_cause = '{{ steps.aurora-rca-inline.results.root_cause }}'
+            logs_raw = {{ steps.fetch-incident-logs.results }}
+
+            def _request(url):
+                req = Request(url, headers={'Authorization': AUTH})
+                with urlopen(req, timeout=20) as resp:
+                    return json.loads(resp.read().decode())
+
+            def _esc(v):
+                return html.escape(str(v or ''), quote=True)
+
+            def _format_logs(logs):
+                if not isinstance(logs, list):
+                    return ''
+                lines = ['Shop-checkout incident logs (last 10m, newest first):', '']
+                for i, e in enumerate(logs[:10], 1):
+                    m = e.get('message', e) if isinstance(e, dict) else {}
+                    lines.append(
+                        f"- {i}. {m.get('timestamp', m.get('time', ''))} | "
+                        f"{m.get('service', m.get('labels_service', ''))} | "
+                        f"{m.get('source_level', '')} | {m.get('event', '')} | pod={m.get('pod', '')}"
+                    )
+                return chr(10).join(lines)
+
+            log_summary = _format_logs(logs_raw)
+
+            body = _request(f'{KEEP}/incidents/{incident_id}')
+            alerts = _request(f'{KEEP}/incidents/{incident_id}/alerts')
+            if isinstance(alerts, dict):
+                alerts = alerts.get('items', [])
+            firing = [a for a in alerts if str(a.get('status', '')).lower() in ('firing', 'alertstatus.firing')]
+            count = len(firing) if firing else int(body.get('alerts_count') or 0)
+
+            seen_ops = set()
+            seen_alerts = set()
+            ops_rows = []
+            alert_rows = []
+            service_names = []
+            for a in firing:
+                svc = a.get('service') or (a.get('labels') or {}).get('service', '')
+                alert_name = a.get('name', '')
+                sev = a.get('severity', '')
+                alert_key = (alert_name, svc)
+                if alert_key not in seen_alerts:
+                    seen_alerts.add(alert_key)
+                    alert_rows.append(
+                        '<tr><td>' + _esc(alert_name) + '</td><td>' + _esc(svc)
+                        + '</td><td>' + _esc(sev) + '</td></tr>'
+                    )
+                if svc and svc not in service_names:
+                    service_names.append(svc)
+                if svc in seen_ops:
+                    continue
+                seen_ops.add(svc)
+                if a.get('runbook_url') or a.get('owner'):
+                    runbook = a.get('runbook_url') or ''
+                    runbook_cell = '<a href="' + _esc(runbook) + '">runbook</a>' if runbook else ''
+                    ops_rows.append(
+                        '<tr><td>' + _esc(svc) + '</td><td>' + _esc(a.get('owner'))
+                        + '</td><td>' + _esc(a.get('escalation_tier')) + '</td><td>'
+                        + runbook_cell + '</td></tr>'
+                    )
+
+            inc_name = body.get('user_generated_name') or 'shop-checkout incident'
+            severity = body.get('severity', 'unknown')
+            scope = str(body.get('rule_fingerprint', '')).replace(',', ' / namespace ')
+            status = _esc(str(body.get('status', '')).replace('IncidentStatus.', '').lower())
+            incident_url = UI + '/incidents/' + incident_id
+            services_label = ', '.join(service_names) if service_names else ', '.join(body.get('services') or [])
+
+            summary_html = (
+                '<h2>' + _esc(inc_name) + '</h2>'
+                + '<table cellpadding="4" cellspacing="0" style="border-collapse:collapse;">'
+                + '<tr><td><b>Severity</b></td><td>' + _esc(severity) + '</td></tr>'
+                + '<tr><td><b>Status</b></td><td>' + status + '</td></tr>'
+                + '<tr><td><b>Alerts linked</b></td><td>' + str(count) + '</td></tr>'
+                + '<tr><td><b>Services</b></td><td>' + _esc(services_label) + '</td></tr>'
+                + '<tr><td><b>Scope</b></td><td>' + _esc(scope) + '</td></tr>'
+                + '</table>'
+            )
+            ops_html = ''
+            if ops_rows:
+                ops_html = (
+                    '<h3>Ops context (mapping)</h3>'
+                    + '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;">'
+                    + '<tr><th>Service</th><th>Owner</th><th>Tier</th><th>Runbook</th></tr>'
+                    + ''.join(ops_rows) + '</table>'
+                )
+            alerts_html = ''
+            if alert_rows:
+                alerts_html = (
+                    '<h3>Correlated alerts</h3>'
+                    + '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;">'
+                    + '<tr><th>Alert</th><th>Service</th><th>Severity</th></tr>'
+                    + ''.join(alert_rows[:15]) + '</table>'
+                )
+            logs_html = ''
+            if log_summary and str(log_summary) not in ('None', 'null', ''):
+                logs_html = (
+                    '<h3>Log summary (Graylog)</h3>'
+                    + '<pre style="white-space:pre-wrap;font-size:13px;">' + _esc(log_summary) + '</pre>'
+                    + '<p><b>Query:</b> <code>' + _esc(graylog_query) + '</code></p>'
+                )
+            else:
+                logs_html = '<p><i>Log summary not available.</i></p>'
+
+            rca_html = ''
+            if aurora_enabled == 'true':
+                rca_html = '<h3>Root cause analysis (Aurora)</h3>'
+                if aurora_status == 'complete' and (rca_summary or root_cause):
+                    if root_cause:
+                        rca_html += '<p><b>Root cause:</b> ' + _esc(root_cause) + '</p>'
+                    if rca_summary:
+                        rca_html += '<p>' + _esc(rca_summary) + '</p>'
+                    if aurora_id:
+                        rca_html += '<p><b>Investigation status:</b> complete (id: ' + _esc(aurora_id) + ')</p>'
+                elif aurora_id:
+                    rca_html += (
+                        '<p><i>Aurora investigation in progress (status: '
+                        + _esc(aurora_status or 'investigating') + ').</i></p>'
+                    )
+                else:
+                    rca_html += '<p><i>Aurora investigation could not be started.</i></p>'
+
+            footer_html = (
+                '<p style="margin:16px 0;"><a href="' + incident_url
+                + '" style="display:inline-block;padding:10px 16px;background:#2563eb;color:#fff;'
+                + 'text-decoration:none;border-radius:6px;font-weight:600;">Open incident in Keep</a></p>'
+            )
+            RESULT = {
+                'subject': '[' + str(severity) + '] ' + str(inc_name),
+                'summary_html': summary_html,
+                'ops_html': ops_html,
+                'alerts_html': alerts_html,
+                'logs_html': logs_html,
+                'rca_html': rca_html,
+                'footer_html': footer_html,
+            }
+            """) or RESULT
   actions:
-    - name: send-shop-checkout-rule-incident-email
-      if: "'{{ incident.incident_type }}' == 'rule' and ('{{ incident.status }}' == 'IncidentStatus.FIRING' or '{{ incident.status }}' == 'firing')"
+    - name: enrich-incident-with-logs
+      if: "'{{ incident.incident_type }}' == 'rule' and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
+      provider:
+        type: mock
+        with:
+          enrich_incident:
+            - key: log_summary
+              value: "{{ steps.format-log-summary.results }}"
+            - key: graylog_query
+              value: 'application:"shop-checkout" AND namespace:"shop"'
+    - name: enrich-incident-with-rca
+      if: "'{{ incident.incident_type }}' == 'rule' and '{{ steps.aurora-rca-inline.results.enabled }}' == 'true' and '{{ steps.aurora-rca-inline.results.aurora_id }}' != ''"
+      provider:
+        type: mock
+        with:
+          enrich_incident:
+            - key: aurora_incident_id
+              value: "{{ steps.aurora-rca-inline.results.aurora_id }}"
+            - key: aurora_rca_status
+              value: "{{ steps.aurora-rca-inline.results.aurora_status }}"
+            - key: aurora_url
+              value: "{{ consts.aurora_api_base }}/api/incidents/{{ steps.aurora-rca-inline.results.aurora_id }}"
+            - key: rca_summary
+              value: "{{ steps.aurora-rca-inline.results.summary }}"
+            - key: root_cause
+              value: "{{ steps.aurora-rca-inline.results.root_cause }}"
+    - name: send-enriched-incident-email
+      if: "'{{ incident.incident_type }}' == 'rule' and ('{{ incident.status }}' == 'IncidentStatus.FIRING' or '{{ incident.status }}' == 'firing') and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
       provider:
         type: smtp
         config: "{{ providers.smtp-poc }}"
@@ -20,18 +342,19 @@ workflow:
           from_name: "Keep shop-checkout PoC"
           to_email:
             - "oncall@shop-checkout.local"
-          subject: "[{{ incident.severity }}] {{ incident.user_generated_name }}"
+          subject: "{{ steps.build-email-sections.results.subject }}"
           html: |
-            <h2>{{ incident.user_generated_name }}</h2>
-            <table cellpadding="4" cellspacing="0" style="border-collapse:collapse;">
-              <tr><td><b>View</b></td><td>{{ incident.incident_type }}</td></tr>
-              <tr><td><b>Severity</b></td><td>{{ incident.severity }}</td></tr>
-              <tr><td><b>Status</b></td><td>keep.lowercase(keep.replace('{{ incident.status }}', 'IncidentStatus.', ''))</td></tr>
-              <tr><td><b>Alerts linked</b></td><td>{{ incident.alerts_count }}</td></tr>
-              <tr><td><b>Services</b></td><td>keep.join({{ incident.services }}, ', ')</td></tr>
-              <tr><td><b>Scope</b></td><td>keep.replace('{{ incident.rule_fingerprint }}', ',', ' / namespace ')</td></tr>
-            </table>
-            <p style="margin:16px 0;">
-              <a href="{{ consts.keep_ui_base }}/incidents/{{ incident.id }}" style="display:inline-block;padding:10px 16px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Open incident in Keep</a>
-            </p>
-            <p style="color:#555;font-size:14px;">Review linked alerts, runbooks, and Graylog enrichment in the incident view.</p>
+            {{ steps.build-email-sections.results.summary_html }}
+            {{ steps.build-email-sections.results.ops_html }}
+            {{ steps.build-email-sections.results.alerts_html }}
+            {{ steps.build-email-sections.results.logs_html }}
+            {{ steps.build-email-sections.results.rca_html }}
+            {{ steps.build-email-sections.results.footer_html }}
+    - name: mark-notification-sent
+      if: "'{{ incident.incident_type }}' == 'rule' and ('{{ incident.status }}' == 'IncidentStatus.FIRING' or '{{ incident.status }}' == 'firing') and '{{ steps.guard-and-wait-for-alert.results.skip }}' != 'true' and '{{ steps.guard-and-wait-for-alert.results.ready }}' == 'true'"
+      provider:
+        type: mock
+        with:
+          enrich_incident:
+            - key: notification_sent
+              value: "true"

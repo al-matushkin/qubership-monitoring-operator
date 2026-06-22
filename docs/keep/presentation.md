@@ -6,7 +6,9 @@ title: Keep PoC — Findings for the Team
 description: Shop-checkout Kind PoC — what Keep can do and what it solves for us
 style: |
   section { font-size: 30px; }
-  section table { font-size: 24px; }
+  section.compact { font-size: 26px; }
+  section.compact li { margin-bottom: 0.08em; }
+  section table { font-size: 22px; }
   section li { margin-bottom: 0.15em; }
 ---
 
@@ -17,7 +19,7 @@ style: |
 3. Suppression vs Alertmanager
 4. Mapping (runbook / owner)
 5. Extraction
-6. Root cause & alert chains
+6. Root cause & alert chains (+ optional Aurora RCA)
 7. Notifications (SMTP, Jira, messengers)
 8. Integration path (`vmalert → Keep`)
 
@@ -57,11 +59,14 @@ vmalert (PrometheusRules)
 
 ## Log enrichment — findings
 
-- Enrichment is **explicit** (provider + workflow), not automatic
-- **PoC:** Graylog provider → `log_snippet` on alerts, `log_summary` on incidents
-- Join keys: `service`, `namespace`, `pod` (+ time around `startsAt`)
+- **Explicit** — provider + workflow, not automatic
+- **Alerts:** Graylog → `log_snippet` (per-alert workflow)
+- **Incidents:** `log_summary` on rule `created` — wait until `alerts_count ≥ 2`
+- Join keys: `service`, `namespace`, `pod`
 
-**Solves:** log evidence on the incident — faster triage & RCA
+**Solves:** log evidence on the incident — faster triage
+
+**Recommendation:** rollup on **rule** incidents, not topology `updated`
 
 ---
 
@@ -75,21 +80,42 @@ vmalert (PrometheusRules)
 - **Correlation rules** also group by labels (`application=shop-checkout`)
 - Alerts need a `service` label matching the graph
 
-**PoC:** 3-service outage → **one incident** (`shopchk-*` + topology views)
+**PoC:** 3-service cascade → **one rule incident** (`shopchk-*`) + optional topology view (`Application incident: shop-checkout`)
 
 **Solves:** one checkout outage view, not 3+ separate fires
 
 ---
 
-## Topology — caveats
+<!-- class: compact -->
 
-- **Leaf services:** no outgoing edge → alerts may miss topology incident  
-  → workaround: synthetic dependency (`payments-api → external-psp`)
+## Topology — rule vs topology
+
+| | Rule incident (`shopchk-*`) | Topology incident |
+|---|---------------------------|-------------------|
+| Source | `correlation-rules.json` | Topology processor |
+| Workflows | SMTP, Graylog rollup, Aurora (optional) | Graph + linked alerts (no workflows in PoC) |
+| Trigger | `incident:created` | Processor ticks (~10s) |
+
+**Recommendation:** run notifications and enrichment on **rule** incidents; use topology for the dependency graph.
+
+**Ops split:** rule = actions; topology = visualization
+
+---
+
+## Topology — caveats (graph)
+
+- **Leaf services:** no outgoing edge → may miss topology incident  
+  → synthetic dependency (`payments-api → external-psp`)
 - **One incident per app** — same id reused across waves
-- **Don't manual-resolve** while Alertmanager still firing
-- **Sources:** manual YAML now; Cilium/Hubble / inventory-tool later
+- **Sources:** manual YAML now; Cilium/Hubble later
 
-**Ops split:** rule incidents for grouping; topology for app-level view
+---
+
+## Topology — caveats (ops)
+
+- **Don't manual-resolve** while Alertmanager still firing
+- **Cascade:** stagger symptoms (~10–20s) to avoid duplicate `shopchk-*`
+- **Recover:** all three services; wait ~60s for AM resolved webhooks
 
 ---
 
@@ -101,8 +127,8 @@ vmalert (PrometheusRules)
 
 | | VMAlertmanager | Keep |
 |---|----------------|------|
-| Inhibition | ✅ | ❌ |
-| Silences | ✅ | Maintenance windows |
+| Inhibition | Yes | No |
+| Silences | Yes | Maintenance windows |
 | Symptoms | Can hide | Correlates |
 
 - **`keep-shadow`:** light filtering — Keep needs symptom alerts
@@ -146,12 +172,29 @@ vmalert (PrometheusRules)
 
 ## Root cause — findings
 
-**Keep OSS does:** group alerts, topology map, log evidence, time-sorted alert list  
-**Keep OSS does not:** auto root-cause, alert parent/child graph, incident hierarchy
+**Keep OSS does:** group alerts, topology map, logs, time-sorted list  
+**Does not:** auto root-cause, parent/child alerts, incident hierarchy
 
-**Practical RCA:** topology (upstream) → alert names → log ordering → `startsAt`
+**Practical RCA:** topology → alert names → logs → `startsAt`
 
-**Solves:** one triage pane — RCA stays human, not automated
+**Optional:** Aurora stub — wait ≥2 alerts → enrich `rca_summary` / `root_cause`
+
+**Solves:** one triage pane — RCA human unless external engine added
+
+---
+
+## Aurora RCA — enrich-back (optional)
+
+```
+shopchk-* created → wait (alerts_count ≥ 2)
+                 → Graylog + Aurora poll → enrich incident
+```
+
+- Kind **stub** only — not production Aurora
+- Use `mock` + `enrich_incident` (not HTTP `force: true`)
+- Production: set `incident_url` for Keep External incident link
+
+**Solves:** Keep as hub + RCA sidecar (same idea as Jira → notify)
 
 ---
 
@@ -162,28 +205,27 @@ vmalert (PrometheusRules)
 ## Notifications — findings
 
 - Workflows + providers (SMTP, Jira, Webex, …); templates use `{{ incident.* }}`, `{{ steps.* }}`
-- **PoC (SMTP):** 1 email per incident (not per alert); topology guarded by `topology_smtp_sent`
+- **PoC (SMTP):** **rule incidents** (`shopchk-*` on `created`) — 1 email per incident, not per alert
+- Topology incident: visualization only — same notification pattern as other enrichments (rule-first)
 - Emails include Keep incident link, services, severity
 
 **Solves:** incident-shaped notifications — less noise than per-alert email
 
 ---
 
-## Jira + messenger (cross-team concern)
+## Jira + messenger
 
-**Symptom today:** Webex/Slack message has **no Jira ticket** — usually parallel Alertmanager receivers with **no shared state**, not Jira hiding the id.
+**Problem:** Webex/Slack has no Jira link — parallel receivers, no shared state.
 
-**Keep fix:** **One sequential workflow**
+**Fix:** one sequential workflow:
 
 ```
-create Jira → enrich (ticket_id, ticket_url) → notify (Webex/SMTP)
+create Jira → enrich ticket_url → notify (Webex/SMTP)
 ```
 
-Use `{{ steps.create-jira.results.ticket_url }}` in the same run.
+**Avoid:** two workflows on `incident:created` (race).
 
-**Avoid:** two workflows both on `incident:created` — same race as Alertmanager.
-
-*Jira/Webex not deployed in PoC — pattern from Keep docs + same ordering lessons as topology SMTP.*
+*Not deployed in PoC — pattern from Keep docs.*
 
 ---
 
@@ -196,7 +238,8 @@ Use `{{ steps.create-jira.results.ticket_url }}` in the same run.
 **Validated:** `vmalert → VMAlertmanager → keep-shadow → Keep`
 
 - Keeps VMAlertmanager HA, routing, ops-route inhibition
-- **Not recommended:** `vmalert → Keep` direct (different API)
+- **Webhook path:** `/alerts/event/prometheus` — promotes `application`, `namespace`, `service` to top-level (required for CEL rules)
+- **Not recommended:** `/alerts/event/victoriametrics` or `vmalert → Keep` direct
 
 **Solves:** add Keep without replacing VMAlertmanager
 
@@ -206,58 +249,88 @@ Use `{{ steps.create-jira.results.ticket_url }}` in the same run.
 
 ---
 
-## Known quirks & workarounds
+<!-- class: compact -->
 
-- Enrichment in `if` (UUID hyphen bug) → HTTP `GET /incidents/{id}`
+## Known quirks (workflows)
+
+- Enrichment in `if` → HTTP `GET /incidents/{id}`
 - `contains` in `if` broken → use `== 'IncidentStatus.FIRING'`
-- Leaf topology service → synthetic outgoing dependency
-- Stale incident → don't resolve while AM firing; recover → wait ~60s
-- Mapping invisible → `ALERT_SIDEBAR_FIELDS`
-
-**PoC:** [`keep-shop-checkout-poc/`](../examples/keep-shop-checkout-poc/)
+- Partial enrich → `mock` + `enrich_incident`, not HTTP `force: true`
+- Correlation race → stagger cascade; `gunicorn --workers 1` on Kind
 
 ---
+
+<!-- class: compact -->
+
+## Known quirks (ops)
+
+- Leaf topology → synthetic outgoing dependency
+- Stale incident → don't resolve while AM firing; wait ~60s after recover
+- Mapping hidden in UI → `ALERT_SIDEBAR_FIELDS`
+- Platform K8s alerts → separate rules (node, deployment)
+
+---
+
+<!-- class: compact -->
 
 ## What Keep solves — summary
 
 | Problem | Answer | Status |
 |---------|--------|--------|
-| Alert storm | One correlated incident | ✅ |
-| Missing logs / owner | Graylog + CSV mapping | ✅ |
-| App-level view | Topology + rules | ✅ |
-| Noisy email | Per-incident SMTP | ✅ |
-| Ticket not in messenger | Jira → notify (sequential) | 📋 |
-| Auto RCA | Human + topology/logs | ⚠️ |
-| Replace Alertmanager | Shadow route | ✅ |
+| Alert storm | One `shopchk-*` incident | In PoC |
+| Logs / owner | Graylog + CSV mapping | In PoC |
+| App view | Topology + rule incident | In PoC |
+| Noisy email | Per-incident SMTP | In PoC |
+| Ticket in messenger | Jira → notify | Planned |
+| Auto RCA | Human; optional Aurora | Partial |
+| Replace AM | Shadow route | In PoC |
+| K8s noise | Platform rules | Planned |
 
 ---
 
-## Recommended phasing
+## Recommended phasing (1/2)
 
-1. **Now:** VMAlertmanager `keep-shadow` + correlation rules + mapping CSV for key apps.
-2. **Next:** Graylog (or standard log backend) enrichment workflows; incident notifications (SMTP/Webex).
-3. **Later:** Topology YAML maintenance or provider pull (Cilium/Hubble); inventory-tool → Keep graph pipeline.
-4. **Per app:** Manual topology for 1–2 pilots; expand if topology incidents prove worth the upkeep.
-
-**Label contract:** Prometheus `service`, `namespace`, `application` must match Keep topology & matchers.
+1. **Now:** `keep-shadow` + correlation rules + mapping CSV
+2. **Next:** Graylog + SMTP on rule `created` (wait-for-cascade)
+3. **Later:** Topology provider or YAML; platform K8s rules
 
 ---
+
+## Recommended phasing (2/2)
+
+4. **Optional:** External RCA (Aurora) enrich-back on rule incidents
+5. **Per app:** Manual topology for 1–2 pilots
+
+**Labels:** `service`, `namespace`, `application` + **`/prometheus` webhook**
+
+---
+
+<!-- class: compact -->
 
 ## Open questions
 
-- Topology source in prod clouds? (manual vs Cilium vs inventory-tool)
-- Upstream Keep fixes (leaf services, enrichment fingerprint)?
-- Enterprise AI worth it? Keep vs VMAlertmanager for ops email?
-- Auto-tag probable root via workflow rules?
+- Topology in prod: manual vs Cilium vs inventory-tool?
+- Upstream Keep fixes (leaf services, enrichment)?
+- Enterprise AI vs external RCA (Aurora)?
+- Platform rules: group by node / deployment?
+- Auto-tag probable root in workflow?
 
 ---
 
-## Takeaways for the team
+<!-- class: compact -->
 
-1. **Keep fits as a correlation + enrichment layer** on top of VMAlertmanager — not a replacement.
-2. **Biggest wins validated:** one incident per outage, logs + runbooks on the incident, quieter incident emails.
-3. **RCA stays human** — Keep assembles context; topology & timestamps guide, not decide.
-4. **Notifications need ordering** — Jira then messenger in one workflow fixes the ticket-link gap.
-5. **Invest in labels** — `service` on alerts unlocks topology, mapping, and log joins.
+## Takeaways (1/2)
 
-**Full detail:** [`follow-up-checklist.md`](follow-up-checklist.md)
+1. Keep = **correlation + enrichment** on VMAlertmanager — not a replacement
+2. **Wins:** one rule incident, logs + runbooks, incident-shaped email
+3. **Rule vs topology:** workflows on rule; graph for dependencies
+
+---
+
+<!-- class: compact -->
+
+## Takeaways (2/2)
+
+4. **RCA:** human in OSS; optional Aurora enrich-back
+5. **Notify:** sequential workflows (Jira → messenger; enrich then email)
+6. **Labels:** `service` unlocks topology, mapping, logs; use Prometheus webhook
