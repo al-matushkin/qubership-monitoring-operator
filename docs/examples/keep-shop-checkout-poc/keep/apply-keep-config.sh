@@ -345,6 +345,58 @@ except urllib.error.HTTPError as exc:
 PY
 }
 
+retire_legacy_workflows() {
+  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
+import json, sys, urllib.request
+
+api_url, api_key = sys.argv[1:3]
+auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
+headers = {"Authorization": auth}
+req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
+legacy_ids = {
+    "shop-checkout-graylog-incident-enrichment",
+    "shop-checkout-smtp-topology-notification",
+    "shop-checkout-aurora-rca-trigger",
+    "shop-checkout-aurora-rca-topology-trigger",
+    "shop-checkout-aurora-rca-topology-sync",
+    "shop-checkout-aurora-rca-poll",
+    "shop-checkout-aurora-rca-rule-poll",
+    "shop-checkout-aurora-rca-rule-trigger",
+}
+legacy_names = {
+    "Shop checkout Graylog incident enrichment (rule)",
+    "Shop checkout Graylog incident enrichment",
+    "Shop checkout SMTP notification (topology)",
+    "Shop checkout Aurora RCA trigger",
+    "Shop checkout Aurora RCA trigger (topology)",
+    "Shop checkout Aurora RCA topology sync",
+    "Shop checkout Aurora RCA sync",
+    "Shop checkout Aurora RCA poll",
+    "Shop checkout Aurora RCA trigger (rule)",
+    "Shop checkout Aurora RCA (rule)",
+}
+workflows = json.load(urllib.request.urlopen(req, timeout=20))
+to_delete = {
+    w["id"]
+    for w in workflows
+    if w.get("id") in legacy_ids or w.get("name") in legacy_names
+}
+for wid in sorted(to_delete):
+    del_req = urllib.request.Request(
+        f"{api_url.rstrip('/')}/workflows/{wid}",
+        headers=headers,
+        method="DELETE",
+    )
+    try:
+        urllib.request.urlopen(del_req, timeout=20)
+        print(f"removed legacy workflow: {wid}")
+    except Exception as exc:
+        print(f"legacy workflow {wid} not removed: {exc}")
+if not to_delete:
+    print("no legacy workflows to remove (ok)")
+PY
+}
+
 echo "Importing Keep topology..."
 import_topology
 
@@ -362,30 +414,6 @@ if kubectl get svc graylog-service -n logging >/dev/null 2>&1; then
   install_graylog_provider || echo "Graylog provider install skipped (already installed or auth failed)."
   echo "Installing Graylog alert enrichment workflow..."
   install_workflow "${ROOT_DIR}/keep/graylog-enrichment-workflow.yaml" || echo "Graylog alert workflow install skipped."
-  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
-import json, sys, urllib.request
-api_url, api_key = sys.argv[1:3]
-auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
-headers = {"Authorization": auth}
-req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
-retire_ids = {
-    "shop-checkout-graylog-incident-enrichment",
-}
-retire_names = {
-    "Shop checkout Graylog incident enrichment (rule)",
-    "Shop checkout Graylog incident enrichment",
-}
-for w in json.load(urllib.request.urlopen(req, timeout=20)):
-    if w.get("id") in retire_ids or w.get("name") in retire_names:
-        del_req = urllib.request.Request(
-            f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE"
-        )
-        try:
-            urllib.request.urlopen(del_req, timeout=20)
-            print(f"retired workflow: {w['id']} (incident logs now in integrated SMTP workflow)")
-        except Exception as exc:
-            print(f"workflow {w['id']} not removed: {exc}")
-PY
 else
   echo "Graylog service not found in logging namespace; skipping provider/workflow install."
   echo "Re-run this script after deploying the logging stack."
@@ -394,22 +422,6 @@ fi
 if kubectl get svc mailpit -n keep >/dev/null 2>&1; then
   echo "Installing SMTP provider (Mailpit)..."
   install_smtp_provider || echo "SMTP provider install skipped."
-  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
-import json, sys, urllib.request
-api_url, api_key = sys.argv[1:3]
-auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
-headers = {"Authorization": auth}
-req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
-for w in json.load(urllib.request.urlopen(req, timeout=20)):
-    if w.get("id") == "shop-checkout-smtp-topology-notification" or w.get("name") == "Shop checkout SMTP notification (topology)":
-        del_req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE")
-        try:
-            urllib.request.urlopen(del_req, timeout=20)
-            print(f"retired workflow: {w['id']}")
-        except Exception as exc:
-            print(f"workflow {w['id']} not removed: {exc}")
-        break
-PY
   echo "Installing integrated SMTP workflow (Graylog + Aurora + email)..."
   install_workflow "${ROOT_DIR}/keep/smtp-notification-workflow.yaml" || echo "SMTP rule workflow install skipped."
 else
@@ -418,71 +430,13 @@ else
 fi
 
 if kubectl get svc aurora-rca -n aurora >/dev/null 2>&1; then
-  echo "Aurora stub detected — RCA runs inside integrated SMTP workflow (no separate workflow)."
-  # Retire topology / legacy Aurora and separate rule Aurora workflows.
-  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
-import json, sys, urllib.request
-api_url, api_key = sys.argv[1:3]
-auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
-headers = {"Authorization": auth}
-req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
-workflows = json.load(urllib.request.urlopen(req, timeout=20))
-legacy_ids = {
-    "shop-checkout-aurora-rca-trigger",
-    "shop-checkout-aurora-rca-topology-trigger",
-    "shop-checkout-aurora-rca-topology-sync",
-        "shop-checkout-aurora-rca-poll",
-        "shop-checkout-aurora-rca-rule-poll",
-    "shop-checkout-aurora-rca-rule-trigger",
-    "shop-checkout-smtp-topology-notification",
-}
-legacy_names = {
-    "Shop checkout Aurora RCA trigger",
-    "Shop checkout Aurora RCA trigger (topology)",
-    "Shop checkout Aurora RCA topology sync",
-    "Shop checkout Aurora RCA sync",
-        "Shop checkout Aurora RCA poll",
-        "Shop checkout Aurora RCA trigger (rule)",
-    "Shop checkout Aurora RCA (rule)",
-    "Shop checkout SMTP notification (topology)",
-}
-to_delete = {
-    w["id"]
-    for w in workflows
-    if w.get("id") in legacy_ids or w.get("name") in legacy_names
-}
-for wid in to_delete:
-    del_req = urllib.request.Request(
-        f"{api_url.rstrip('/')}/workflows/{wid}",
-        headers=headers,
-        method="DELETE",
-    )
-    try:
-        urllib.request.urlopen(del_req, timeout=20)
-        print(f"retired workflow: {wid}")
-    except Exception as exc:
-        print(f"workflow {wid} not removed: {exc}")
-if not to_delete:
-    print("no legacy Aurora workflows to retire (ok)")
-PY
+  echo "Aurora stub detected — RCA runs inside integrated SMTP workflow."
 else
-  echo "Aurora RCA stub not found — integrated SMTP workflow skips Aurora (Graylog + email only)."
+  echo "Aurora RCA stub not found — integrated SMTP workflow skips Aurora when unreachable (Graylog + email only)."
   echo "Deploy stub with: kubectl apply -f k8s/aurora-rca-stub.yaml"
-  python3 - <<'PY' "${KEEP_API_URL}" "${KEEP_API_KEY}"
-import json, sys, urllib.request
-api_url, api_key = sys.argv[1:3]
-auth = "Basic " + __import__("base64").b64encode(f"api_key:{api_key}".encode()).decode()
-headers = {"Authorization": auth}
-req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows", headers=headers)
-for w in json.load(urllib.request.urlopen(req, timeout=20)):
-    if w.get("id") == "shop-checkout-aurora-rca-rule-trigger" or w.get("name") == "Shop checkout Aurora RCA (rule)":
-        del_req = urllib.request.Request(f"{api_url.rstrip('/')}/workflows/{w['id']}", headers=headers, method="DELETE")
-        try:
-            urllib.request.urlopen(del_req, timeout=20)
-            print(f"retired workflow: {w['id']}")
-        except Exception as exc:
-            print(f"workflow {w['id']} not removed: {exc}")
-PY
 fi
+
+echo "Removing legacy workflows from earlier PoC revisions (if present)..."
+retire_legacy_workflows
 
 echo "Keep configuration applied."
