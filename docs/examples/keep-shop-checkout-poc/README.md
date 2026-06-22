@@ -140,7 +140,7 @@ curl -u 'api_key:any-local-key' \
 
 ### Keep persistence + ingress (Kind)
 
-This PoC deploys Keep with **bundled PostgreSQL** (`values-keep-kind-postgres.yaml`) — chart-managed PVC, K8s-backed provider secrets, topology processor, and ingress on `keep.local`.
+This PoC deploys Keep **0.54.0** (image override in `values-keep-kind-postgres.yaml`; Helm chart 0.1.96 still defaults to 0.52.1) with **bundled PostgreSQL** — chart-managed PVC, K8s-backed provider secrets, topology processor, and ingress on `keep.local`.
 
 ```bash
 chmod +x deploy-keep-ingress-kind.sh port-forward-keep-ingress.sh
@@ -445,6 +445,7 @@ Switching between SQLite and Postgres starts a **fresh** database; re-run `apply
 | Recover after cascade | `./shop-control.sh recover` with no args now recovers **all three** (payments-api first). `./shop-control.sh recover checkout-demo` alone leaves payments in outage and checkout keeps failing charges |
 | Duplicate rule/topology incidents (`shopchk-4` + `shopchk-5`, twin topology rows) | Keep image defaults to Gunicorn `--workers 4`; PoC values set `--workers 1`. Re-run `./deploy-keep-ingress-kind.sh` after edits. Also caused by **same-second** alert batches — use staggered cascade timing (see [Cascading outage timing](#cascading-outage-timing-checkout-demo-trigger)) |
 | Orphan duplicate incident won't resolve (UI hangs) | Stale row lock from worker race; restart `keep-backend`, resolve once, or fix `alerts_count`/status in DB |
+| API unreachable / `QueuePool` errors after long uptime | Known in Keep ≤0.52.1 (session leak); PoC uses **0.54.0** with fix. Recovery: restart `keep-backend` + terminate Postgres `idle in transaction` sessions |
 | Keep quiet but shop still in outage / AM still firing | Manual resolve drift or deduped repeats; `./shop-control.sh recover`, wait for AM resolved webhooks, then `resolve-stale-incidents.sh` if needed — do not manual-resolve during an active outage |
 | Incidents stuck after recover (`CheckoutDemoHighErrorRatio`) | Alert uses `rate(checkout_requests_total[5m])`, not lifetime `/status` `error_ratio`; wait ~5–6m or `kubectl -n shop rollout restart deploy/checkout-demo` to speed up |
 | Incidents/alerts need manual refresh; no WebSocket in DevTools | PoC `frontend.env` / `backend.env` must include chart defaults (`PUSHER_APP_KEY`, `PUSHER_HOST=keep-websocket`, …). Re-run `./deploy-keep-ingress-kind.sh`. DevTools: **Socket** filter (not text search `ws`). Menu badge may update via HTTP polling while the list stays stale without push |

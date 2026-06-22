@@ -1,4 +1,5 @@
 # Kind PoC overlay for the upstream Keep Helm chart (keephq/keep).
+# Chart 0.1.96 defaults to app 0.52.1 — override images to pick up fixes (e.g. 0.54.0 session leak).
 # Bundled PostgreSQL (fresh DB), K8s secret manager, topology processor, ingress.
 #
 # Prerequisite: ./deploy-keep-ingress-kind.sh (defaults to this file; override with KEEP_VALUES_FILE).
@@ -40,6 +41,8 @@ database:
     storageClass: standard
 
 backend:
+  image:
+    tag: "0.54.0"
   waitForDatabase:
     enabled: true
     port: 5432
@@ -99,6 +102,8 @@ backend:
       mountPath: /tmp/prometheus
 
 frontend:
+  image:
+    tag: "0.54.0"
   env:
     # Helm chart replaces frontend.env entirely — include chart defaults or WebSocket
     # (Pusher/Soketi) never connects and the UI needs manual refresh for updates.

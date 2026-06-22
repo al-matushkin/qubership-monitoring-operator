@@ -22,6 +22,8 @@ database:
   enabled: false
 
 backend:
+  image:
+    tag: "0.54.0"
   waitForDatabase:
     enabled: false
   args:
@@ -87,6 +89,8 @@ backend:
       mountPath: /tmp/prometheus
 
 frontend:
+  image:
+    tag: "0.54.0"
   env:
     # Helm chart replaces frontend.env entirely — include chart defaults or WebSocket
     # (Pusher/Soketi) never connects and the UI needs manual refresh for updates.
